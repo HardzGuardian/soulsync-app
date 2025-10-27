@@ -456,7 +456,7 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('controller-updated', { controller: userName });
   });
 
-  // Manual sync request - sync with current controller
+  // Manual sync request - IMPROVED with better time calculation
   socket.on('request-sync', () => {
     const roomId = userRooms.get(socket.id);
     if (!roomId) return;
@@ -469,12 +469,15 @@ io.on('connection', (socket) => {
       calculatedTime += (Date.now() - room.lastUpdate) / 1000;
     }
 
+    // Ensure time is not negative and send precise data
     socket.emit('sync-response', {
-      time: calculatedTime,
+      time: Math.max(0, calculatedTime),
       isPlaying: room.isPlaying,
       videoId: room.currentVideo?.videoId,
       controller: room.currentController
     });
+    
+    console.log(`Sync requested by ${room.users.get(socket.id)} - Sending time: ${Math.max(0, calculatedTime)}`);
   });
 
   // Chat functionality

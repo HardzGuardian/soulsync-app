@@ -29,9 +29,10 @@ function Room() {
   const [currentController, setCurrentController] = useState(null);
   
   const playerRef = useRef(null);
+  const hiddenPlayerRef = useRef(null);
   const chatContainerRef = useRef(null);
   const hasJoinedRef = useRef(false);
-  const hiddenPlayerRef = useRef(null); // Hidden player for audio-only mode
+  const playerInitializedRef = useRef(false);
 
   // Setup socket connection with proper reconnection handling
   useEffect(() => {
@@ -40,7 +41,6 @@ function Room() {
       return;
     }
 
-    // Prevent multiple socket connections
     if (socket) {
       return;
     }
@@ -52,7 +52,6 @@ function Room() {
     console.log('Connecting to socket:', socketUrl);
 
     const newSocket = io(socketUrl, {
-      // Proper socket configuration to prevent reconnection spam
       reconnection: true,
       reconnectionAttempts: 3,
       reconnectionDelay: 1000,
@@ -68,7 +67,6 @@ function Room() {
       console.log('Socket connected successfully:', newSocket.id);
       setSyncStatus('Connected');
       
-      // Only join room once on initial connection
       if (!hasJoinedRef.current) {
         newSocket.emit('join-room', { roomId, userName });
         hasJoinedRef.current = true;
@@ -103,23 +101,17 @@ function Room() {
       setCurrentVideo(video);
       setIsPlaying(playing);
       setCurrentController(controller);
-      if (playing) {
-        if (playerRef.current) {
-          playerRef.current.playVideo();
-        }
-        if (hiddenPlayerRef.current) {
-          hiddenPlayerRef.current.playVideo();
-        }
-      }
+      playerInitializedRef.current = false;
+      initializePlayers();
     });
 
     newSocket.on('video-played', ({ controller }) => {
       setIsPlaying(true);
       setCurrentController(controller);
-      if (playerRef.current) {
+      if (playerRef.current && showVideo) {
         playerRef.current.playVideo();
       }
-      if (hiddenPlayerRef.current) {
+      if (hiddenPlayerRef.current && !showVideo) {
         hiddenPlayerRef.current.playVideo();
       }
     });
@@ -127,43 +119,47 @@ function Room() {
     newSocket.on('video-paused', ({ controller }) => {
       setIsPlaying(false);
       setCurrentController(controller);
-      if (playerRef.current) {
+      if (playerRef.current && showVideo) {
         playerRef.current.pauseVideo();
       }
-      if (hiddenPlayerRef.current) {
+      if (hiddenPlayerRef.current && !showVideo) {
         hiddenPlayerRef.current.pauseVideo();
       }
     });
 
     newSocket.on('video-seeked', ({ time, controller }) => {
       setCurrentController(controller);
-      if (playerRef.current) {
+      if (playerRef.current && showVideo) {
         playerRef.current.seekTo(time, true);
       }
-      if (hiddenPlayerRef.current) {
+      if (hiddenPlayerRef.current && !showVideo) {
         hiddenPlayerRef.current.seekTo(time, true);
       }
     });
 
-    // Manual sync response
+    // Manual sync response - FIXED
     newSocket.on('sync-response', ({ time, isPlaying: serverPlaying, videoId, controller }) => {
+      console.log('Sync response received:', { time, serverPlaying, videoId, controller });
       if (currentVideo?.videoId === videoId) {
-        if (playerRef.current) {
+        // Sync both players
+        if (playerRef.current && showVideo) {
           playerRef.current.seekTo(time, true);
-        }
-        if (hiddenPlayerRef.current) {
-          hiddenPlayerRef.current.seekTo(time, true);
-        }
-        if (serverPlaying !== isPlaying) {
           if (serverPlaying) {
-            if (playerRef.current) playerRef.current.playVideo();
-            if (hiddenPlayerRef.current) hiddenPlayerRef.current.playVideo();
+            playerRef.current.playVideo();
           } else {
-            if (playerRef.current) playerRef.current.pauseVideo();
-            if (hiddenPlayerRef.current) hiddenPlayerRef.current.pauseVideo();
+            playerRef.current.pauseVideo();
           }
-          setIsPlaying(serverPlaying);
         }
+        if (hiddenPlayerRef.current && !showVideo) {
+          hiddenPlayerRef.current.seekTo(time, true);
+          if (serverPlaying) {
+            hiddenPlayerRef.current.playVideo();
+          } else {
+            hiddenPlayerRef.current.pauseVideo();
+          }
+        }
+        
+        setIsPlaying(serverPlaying);
         setCurrentController(controller);
         setSyncStatus(`Synced with ${controller}`);
         setIsSyncing(false);
@@ -171,7 +167,6 @@ function Room() {
       }
     });
 
-    // Controller update
     newSocket.on('controller-updated', ({ controller }) => {
       setCurrentController(controller);
     });
@@ -182,8 +177,6 @@ function Room() {
     });
 
     newSocket.on('user-joined', ({ userName: joinedUser, userCount }) => {
-      console.log(`${joinedUser} joined the room`);
-      // Only show system message if it's not the current user
       if (joinedUser !== userName) {
         const systemMessage = {
           id: Date.now().toString() + Math.random(),
@@ -197,8 +190,6 @@ function Room() {
     });
 
     newSocket.on('user-left', ({ userName: leftUser, userCount }) => {
-      console.log(`${leftUser} left the room`);
-      // Only show system message if it's not the current user
       if (leftUser !== userName) {
         const systemMessage = {
           id: Date.now().toString() + Math.random(),
@@ -234,34 +225,44 @@ function Room() {
     }
   }, [messages]);
 
-  // Initialize YouTube Players
+  // Initialize YouTube Players when currentVideo changes
   useEffect(() => {
+    if (currentVideo && !playerInitializedRef.current) {
+      initializePlayers();
+    }
+  }, [currentVideo]);
+
+  // Initialize YouTube Players
+  const initializePlayers = () => {
+    if (!currentVideo) return;
+
+    // Load YouTube API if not already loaded
     if (!window.YT) {
       const tag = document.createElement('script');
       tag.src = 'https://www.youtube.com/iframe_api';
       const firstScriptTag = document.getElementsByTagName('script')[0];
       firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
 
-      window.onYouTubeIframeAPIReady = initializePlayers;
+      window.onYouTubeIframeAPIReady = () => {
+        createPlayers();
+      };
     } else {
-      initializePlayers();
+      createPlayers();
     }
+  };
 
-    return () => {
-      if (playerRef.current) {
-        playerRef.current.destroy();
-      }
-      if (hiddenPlayerRef.current) {
-        hiddenPlayerRef.current.destroy();
-      }
-    };
-  }, [currentVideo]);
-
-  // Initialize both visible and hidden players
-  const initializePlayers = () => {
+  const createPlayers = () => {
     if (!currentVideo) return;
 
-    // Initialize visible player (only if showVideo is true)
+    // Destroy existing players
+    if (playerRef.current) {
+      try { playerRef.current.destroy(); } catch (e) {}
+    }
+    if (hiddenPlayerRef.current) {
+      try { hiddenPlayerRef.current.destroy(); } catch (e) {}
+    }
+
+    // Create visible player only if showVideo is true
     if (showVideo) {
       const playerHeight = playerSize === 'mini' ? '200' : '400';
       const playerWidth = playerSize === 'mini' ? '356' : '100%';
@@ -275,16 +276,27 @@ function Room() {
           enablejsapi: 1,
           origin: window.location.origin,
           autoplay: isPlaying ? 1 : 0,
-          controls: 1
+          controls: 1,
+          rel: 0,
+          modestbranding: 1
         },
         events: {
-          onReady: onPlayerReady,
-          onStateChange: onPlayerStateChange
+          onReady: (event) => {
+            console.log('Visible player ready');
+            playerInitializedRef.current = true;
+            if (isPlaying) {
+              event.target.playVideo();
+            }
+          },
+          onStateChange: onPlayerStateChange,
+          onError: (error) => {
+            console.error('Visible player error:', error);
+          }
         }
       });
     }
 
-    // Always initialize hidden player for audio continuation
+    // Create hidden player for audio continuation
     hiddenPlayerRef.current = new window.YT.Player('hidden-youtube-player', {
       height: '0',
       width: '0',
@@ -293,62 +305,68 @@ function Room() {
         playsinline: 1,
         enablejsapi: 1,
         origin: window.location.origin,
-        autoplay: isPlaying ? 1 : 0,
+        autoplay: !showVideo && isPlaying ? 1 : 0, // Only autoplay if video is hidden
         controls: 0,
         modestbranding: 1,
         rel: 0
       },
       events: {
-        onReady: onHiddenPlayerReady,
-        onStateChange: onHiddenPlayerStateChange
+        onReady: (event) => {
+          console.log('Hidden player ready');
+          playerInitializedRef.current = true;
+          // Only play hidden player if video is hidden
+          if (!showVideo && isPlaying) {
+            event.target.playVideo();
+          }
+        },
+        onStateChange: onHiddenPlayerStateChange,
+        onError: (error) => {
+          console.error('Hidden player error:', error);
+        }
       }
     });
   };
 
-  const onPlayerReady = (event) => {
-    console.log('Visible YouTube player ready');
-    if (isPlaying) {
-      event.target.playVideo();
-    }
-  };
-
-  const onHiddenPlayerReady = (event) => {
-    console.log('Hidden YouTube player ready');
-    if (isPlaying) {
-      event.target.playVideo();
-    }
-  };
-
   const onPlayerStateChange = (event) => {
-    // Update play/pause state based on visible player events
-    handlePlayerStateChange(event, playerRef.current);
-  };
-
-  const onHiddenPlayerStateChange = (event) => {
-    // Update play/pause state based on hidden player events
-    handlePlayerStateChange(event, hiddenPlayerRef.current);
-  };
-
-  const handlePlayerStateChange = (event, sourcePlayer) => {
+    // Only handle events from the active player
+    if (!showVideo) return;
+    
     if (event.data === window.YT.PlayerState.PLAYING) {
       setIsPlaying(true);
-      // Sync both players
-      if (sourcePlayer === playerRef.current && hiddenPlayerRef.current) {
-        const currentTime = playerRef.current.getCurrentTime();
-        hiddenPlayerRef.current.seekTo(currentTime, true);
-        hiddenPlayerRef.current.playVideo();
-      } else if (sourcePlayer === hiddenPlayerRef.current && playerRef.current) {
-        const currentTime = hiddenPlayerRef.current.getCurrentTime();
-        playerRef.current.seekTo(currentTime, true);
-        playerRef.current.playVideo();
+      // Sync with server
+      if (socket) {
+        socket.emit('play-video');
+      }
+      // Pause hidden player to avoid double audio
+      if (hiddenPlayerRef.current) {
+        hiddenPlayerRef.current.pauseVideo();
       }
     } else if (event.data === window.YT.PlayerState.PAUSED) {
       setIsPlaying(false);
-      // Sync both players
-      if (sourcePlayer === playerRef.current && hiddenPlayerRef.current) {
-        hiddenPlayerRef.current.pauseVideo();
-      } else if (sourcePlayer === hiddenPlayerRef.current && playerRef.current) {
-        playerRef.current.pauseVideo();
+      if (socket) {
+        socket.emit('pause-video');
+      }
+    } else if (event.data === window.YT.PlayerState.ENDED) {
+      setIsPlaying(false);
+      if (socket) {
+        socket.emit('next-video');
+      }
+    }
+  };
+
+  const onHiddenPlayerStateChange = (event) => {
+    // Only handle events from the hidden player when video is hidden
+    if (showVideo) return;
+    
+    if (event.data === window.YT.PlayerState.PLAYING) {
+      setIsPlaying(true);
+      if (socket) {
+        socket.emit('play-video');
+      }
+    } else if (event.data === window.YT.PlayerState.PAUSED) {
+      setIsPlaying(false);
+      if (socket) {
+        socket.emit('pause-video');
       }
     } else if (event.data === window.YT.PlayerState.ENDED) {
       setIsPlaying(false);
@@ -408,26 +426,35 @@ function Room() {
   const handlePlay = () => {
     if (socket) {
       socket.emit('play-video');
-      if (playerRef.current) {
-        playerRef.current.playVideo();
-      }
-      if (hiddenPlayerRef.current) {
-        hiddenPlayerRef.current.playVideo();
-      }
       setIsPlaying(true);
+      
+      // Only play the active player
+      if (showVideo && playerRef.current) {
+        playerRef.current.playVideo();
+        if (hiddenPlayerRef.current) {
+          hiddenPlayerRef.current.pauseVideo(); // Ensure hidden player is paused
+        }
+      } else if (!showVideo && hiddenPlayerRef.current) {
+        hiddenPlayerRef.current.playVideo();
+        if (playerRef.current) {
+          playerRef.current.pauseVideo(); // Ensure visible player is paused
+        }
+      }
     }
   };
 
   const handlePause = () => {
     if (socket) {
       socket.emit('pause-video');
+      setIsPlaying(false);
+      
+      // Pause both players to be safe
       if (playerRef.current) {
         playerRef.current.pauseVideo();
       }
       if (hiddenPlayerRef.current) {
         hiddenPlayerRef.current.pauseVideo();
       }
-      setIsPlaying(false);
     }
   };
 
@@ -442,6 +469,15 @@ function Room() {
       setIsSyncing(true);
       setSyncStatus('Syncing with current controller...');
       socket.emit('request-sync');
+      
+      // Auto reset syncing state after 5 seconds
+      setTimeout(() => {
+        if (isSyncing) {
+          setIsSyncing(false);
+          setSyncStatus('Sync timeout');
+          setTimeout(() => setSyncStatus('Connected'), 3000);
+        }
+      }, 5000);
     }
   };
 
@@ -449,46 +485,79 @@ function Room() {
     const newShowVideo = !showVideo;
     setShowVideo(newShowVideo);
     
-    // If switching to audio-only mode, ensure hidden player continues
-    if (!newShowVideo && isPlaying && hiddenPlayerRef.current) {
-      // Get current time from visible player and sync to hidden player
-      if (playerRef.current) {
-        const currentTime = playerRef.current.getCurrentTime();
-        hiddenPlayerRef.current.seekTo(currentTime, true);
+    // Store current state before switching
+    const wasPlaying = isPlaying;
+    let currentTime = 0;
+    
+    // Get current time from active player
+    if (newShowVideo && hiddenPlayerRef.current) {
+      // Switching to video mode - get time from hidden player
+      try {
+        currentTime = hiddenPlayerRef.current.getCurrentTime();
+      } catch (e) {
+        console.error('Error getting time from hidden player:', e);
       }
-      hiddenPlayerRef.current.playVideo();
+      // Stop hidden player
+      if (hiddenPlayerRef.current) {
+        hiddenPlayerRef.current.pauseVideo();
+      }
+    } else if (!newShowVideo && playerRef.current) {
+      // Switching to audio mode - get time from visible player
+      try {
+        currentTime = playerRef.current.getCurrentTime();
+      } catch (e) {
+        console.error('Error getting time from visible player:', e);
+      }
+      // Stop visible player
+      if (playerRef.current) {
+        playerRef.current.pauseVideo();
+      }
     }
     
-    // If switching back to video mode, reinitialize visible player
-    if (newShowVideo && currentVideo) {
-      setTimeout(() => {
-        if (!playerRef.current) {
-          const playerHeight = playerSize === 'mini' ? '200' : '400';
-          const playerWidth = playerSize === 'mini' ? '356' : '100%';
-
-          playerRef.current = new window.YT.Player('youtube-player', {
-            height: playerHeight,
-            width: playerWidth,
-            videoId: currentVideo.videoId,
-            playerVars: {
-              playsinline: 1,
-              enablejsapi: 1,
-              origin: window.location.origin,
-              autoplay: isPlaying ? 1 : 0,
-              controls: 1
-            },
-            events: {
-              onReady: onPlayerReady,
-              onStateChange: onPlayerStateChange
+    // Reset initialization flag to force reinitialization
+    playerInitializedRef.current = false;
+    
+    // Small delay to ensure DOM is updated
+    setTimeout(() => {
+      if (currentVideo) {
+        // Reinitialize players with the new visibility setting
+        initializePlayers();
+        
+        // After players are ready, seek to the correct time and set play state
+        const waitForPlayer = setInterval(() => {
+          if (playerInitializedRef.current) {
+            clearInterval(waitForPlayer);
+            
+            // Seek to correct time
+            if (newShowVideo && playerRef.current) {
+              playerRef.current.seekTo(currentTime, true);
+              if (wasPlaying) {
+                playerRef.current.playVideo();
+              }
+            } else if (!newShowVideo && hiddenPlayerRef.current) {
+              hiddenPlayerRef.current.seekTo(currentTime, true);
+              if (wasPlaying) {
+                hiddenPlayerRef.current.playVideo();
+              }
             }
-          });
-        }
-      }, 100);
-    }
+          }
+        }, 100);
+        
+        // Timeout after 3 seconds
+        setTimeout(() => clearInterval(waitForPlayer), 3000);
+      }
+    }, 100);
   };
 
   const togglePlayerSize = () => {
     setPlayerSize(prev => prev === 'full' ? 'mini' : 'full');
+    // Reset player when size changes
+    playerInitializedRef.current = false;
+    setTimeout(() => {
+      if (currentVideo && showVideo) {
+        initializePlayers();
+      }
+    }, 100);
   };
 
   const sendMessage = (e) => {
@@ -850,67 +919,7 @@ function Room() {
         )}
       </div>
 
-      {/* Background Audio Status Bar */}
-      {!showVideo && currentVideo && (
-        <div className="background-status">
-          <div style={{ fontSize: '24px' }}>🎵</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: '14px', color: 'white', fontWeight: '600' }}>
-              {currentVideo.title}
-            </div>
-            <div style={{ fontSize: '12px', color: '#a1a1aa' }}>
-              {currentVideo.channelTitle} • {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
-              {currentController && ` • 🎮 ${currentController}`}
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button 
-              onClick={handlePlay}
-              disabled={isPlaying}
-              style={{
-                background: '#10b981',
-                border: 'none',
-                color: 'white',
-                padding: '6px 12px',
-                borderRadius: '15px',
-                cursor: 'pointer',
-                fontSize: '12px'
-              }}
-            >
-              ▶️
-            </button>
-            <button 
-              onClick={handlePause}
-              disabled={!isPlaying}
-              style={{
-                background: '#ef4444',
-                border: 'none',
-                color: 'white',
-                padding: '6px 12px',
-                borderRadius: '15px',
-                cursor: 'pointer',
-                fontSize: '12px'
-              }}
-            >
-              ⏸️
-            </button>
-            <button 
-              onClick={toggleVideoVisibility}
-              style={{
-                background: '#6366f1',
-                border: 'none',
-                color: 'white',
-                padding: '6px 12px',
-                borderRadius: '15px',
-                cursor: 'pointer',
-                fontSize: '12px'
-              }}
-            >
-              Show Video
-            </button>
-          </div>
-        </div>
-      )}
+      {/* REMOVED: Background Audio Status Bar */}
 
       <YouTubeSearch
         onAddToPlaylist={handleAddFromSearch}
