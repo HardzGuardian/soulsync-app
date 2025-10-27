@@ -562,29 +562,23 @@ function Room() {
     
     setShowVideo(newShowVideo);
     
-    if (newShowVideo) {
-      // Switching from audio to video mode - recreate player with video
-      playerInitializedRef.current = false;
-      
-      setTimeout(() => {
-        if (currentVideo) {
-          createPlayer();
-        }
-      }, 100);
-    } else {
-      // Switching from video to audio mode - keep player but hide it
-      console.log('Switching to audio mode - keeping player active');
-      
-      // Just update the player size instead of recreating
-      if (playerRef.current && playerInitializedRef.current) {
-        try {
-          const iframe = document.querySelector('#youtube-player iframe');
-          if (iframe) {
+    // Just toggle iframe visibility without recreating player
+    if (playerRef.current && playerInitializedRef.current) {
+      try {
+        const iframe = document.querySelector('#youtube-player iframe');
+        if (iframe) {
+          if (newShowVideo) {
+            // Show video
+            console.log('Showing video player');
+            iframe.style.height = '480px';
+          } else {
+            // Hide video (audio mode)
+            console.log('Hiding video player (audio mode)');
             iframe.style.height = '0px';
           }
-        } catch (e) {
-          console.error('Error hiding player:', e);
         }
+      } catch (e) {
+        console.error('Error toggling player visibility:', e);
       }
     }
   };
