@@ -14,7 +14,6 @@ function Room() {
   const [playlist, setPlaylist] = useState([]);
   const [currentVideo, setCurrentVideo] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [users, setUsers] = useState([]);
   const [videoUrl, setVideoUrl] = useState('');
   const [syncStatus, setSyncStatus] = useState('Connecting...');
   const [showSearch, setShowSearch] = useState(false);
@@ -30,6 +29,7 @@ function Room() {
   const hasJoinedRef = useRef(false);
   const playerInitializedRef = useRef(false);
   const isTogglingVideoRef = useRef(false);
+  const socketRef = useRef(null);
 
   // Setup socket connection
   useEffect(() => {
@@ -55,6 +55,7 @@ function Room() {
     });
 
     setSocket(newSocket);
+    socketRef.current = newSocket;
 
     newSocket.on('connect', () => {
       console.log('Socket connected:', newSocket.id);
@@ -77,7 +78,7 @@ function Room() {
     });
 
     newSocket.on('room-state', (state) => {
-      console.log('Received room state');
+      console.log('Received room state:', state);
       setPlaylist(state.playlist || []);
       setCurrentVideo(state.currentVideo);
       setIsPlaying(state.isPlaying || false);
@@ -90,6 +91,7 @@ function Room() {
     });
     
     newSocket.on('video-changed', ({ video, isPlaying: playing, controller }) => {
+      console.log('Video changed:', video?.title);
       setCurrentVideo(video);
       setIsPlaying(playing);
       setCurrentController(controller);
@@ -97,42 +99,83 @@ function Room() {
     });
 
     newSocket.on('video-played', ({ controller }) => {
+      console.log('Video played by:', controller);
       setIsPlaying(true);
       setCurrentController(controller);
-      if (playerRef.current) {
-        playerRef.current.playVideo();
+      if (playerRef.current && !isTogglingVideoRef.current) {
+        try {
+          playerRef.current.playVideo();
+        } catch (e) {
+          console.error('Error playing video:', e);
+        }
       }
     });
 
     newSocket.on('video-paused', ({ controller }) => {
+      console.log('Video paused by:', controller);
       setIsPlaying(false);
       setCurrentController(controller);
-      if (playerRef.current) {
-        playerRef.current.pauseVideo();
+      if (playerRef.current && !isTogglingVideoRef.current) {
+        try {
+          playerRef.current.pauseVideo();
+        } catch (e) {
+          console.error('Error pausing video:', e);
+        }
       }
     });
 
     newSocket.on('video-seeked', ({ time, controller }) => {
+      console.log('Video seeked to:', time, 'by:', controller);
       setCurrentController(controller);
-      if (playerRef.current) {
-        playerRef.current.seekTo(time, true);
+      if (playerRef.current && !isTogglingVideoRef.current) {
+        try {
+          playerRef.current.seekTo(time, true);
+        } catch (e) {
+          console.error('Error seeking video:', e);
+        }
       }
     });
 
     newSocket.on('sync-response', ({ time, isPlaying: serverPlaying, videoId, controller }) => {
-      console.log('Sync response:', { time, serverPlaying, videoId, controller });
-      if (currentVideo?.videoId === videoId && playerRef.current) {
-        playerRef.current.seekTo(time, true);
-        if (serverPlaying) {
-          playerRef.current.playVideo();
-        } else {
-          playerRef.current.pauseVideo();
+      console.log('Sync response received:', { time, serverPlaying, videoId, controller });
+      
+      // Always reset syncing state
+      setIsSyncing(false);
+      
+      if (!currentVideo || currentVideo.videoId !== videoId) {
+        console.log('Video ID mismatch, skipping sync');
+        setSyncStatus('Video changed');
+        setTimeout(() => setSyncStatus('Connected'), 2000);
+        return;
+      }
+
+      if (playerRef.current && playerInitializedRef.current) {
+        try {
+          console.log('Syncing player to:', time, serverPlaying ? 'playing' : 'paused');
+          playerRef.current.seekTo(time, true);
+          
+          // Wait a moment for seek to complete
+          setTimeout(() => {
+            if (serverPlaying) {
+              playerRef.current.playVideo();
+            } else {
+              playerRef.current.pauseVideo();
+            }
+          }, 100);
+          
+          setIsPlaying(serverPlaying);
+          setCurrentController(controller);
+          setSyncStatus(`Synced with ${controller}`);
+          setTimeout(() => setSyncStatus('Connected'), 3000);
+        } catch (e) {
+          console.error('Error during sync:', e);
+          setSyncStatus('Sync failed');
+          setTimeout(() => setSyncStatus('Connected'), 2000);
         }
-        setIsPlaying(serverPlaying);
-        setCurrentController(controller);
-        setSyncStatus(`Synced with ${controller}`);
-        setIsSyncing(false);
-        setTimeout(() => setSyncStatus('Connected'), 3000);
+      } else {
+        console.log('Player not ready for sync');
+        setSyncStatus('Player not ready');
+        setTimeout(() => setSyncStatus('Connected'), 2000);
       }
     });
 
@@ -181,9 +224,10 @@ function Room() {
         newSocket.removeAllListeners();
         newSocket.disconnect();
       }
+      socketRef.current = null;
       hasJoinedRef.current = false;
     };
-  }, [roomId, userName, navigate]);
+  }, [roomId, userName, navigate, currentVideo]);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -197,7 +241,7 @@ function Room() {
     if (currentVideo && !playerInitializedRef.current && !isTogglingVideoRef.current) {
       initializePlayer();
     }
-  }, [currentVideo]);
+  }, [currentVideo, showVideo]);
 
   const initializePlayer = () => {
     if (!currentVideo || isTogglingVideoRef.current) return;
@@ -252,7 +296,9 @@ function Room() {
             console.log('Player ready');
             playerInitializedRef.current = true;
             if (isPlaying) {
-              event.target.playVideo();
+              setTimeout(() => {
+                event.target.playVideo();
+              }, 100);
             }
           },
           onStateChange: onPlayerStateChange,
@@ -272,16 +318,16 @@ function Room() {
     if (event.data === window.YT.PlayerState.PLAYING) {
       if (!isPlaying) {
         setIsPlaying(true);
-        if (socket) socket.emit('play-video');
+        if (socketRef.current) socketRef.current.emit('play-video');
       }
     } else if (event.data === window.YT.PlayerState.PAUSED) {
       if (isPlaying) {
         setIsPlaying(false);
-        if (socket) socket.emit('pause-video');
+        if (socketRef.current) socketRef.current.emit('pause-video');
       }
     } else if (event.data === window.YT.PlayerState.ENDED) {
       setIsPlaying(false);
-      if (socket) socket.emit('next-video');
+      if (socketRef.current) socketRef.current.emit('next-video');
     }
   };
 
@@ -293,7 +339,7 @@ function Room() {
 
   const addToPlaylist = async (e) => {
     e.preventDefault();
-    if (!videoUrl.trim() || !socket) return;
+    if (!videoUrl.trim() || !socketRef.current) return;
 
     const videoId = extractVideoId(videoUrl);
     if (!videoId) {
@@ -303,14 +349,14 @@ function Room() {
 
     try {
       const videoInfo = await youtubeAPI.getVideoInfo(videoId);
-      socket.emit('add-to-playlist', {
+      socketRef.current.emit('add-to-playlist', {
         videoId: videoInfo.videoId,
         title: videoInfo.title,
         thumbnail: videoInfo.thumbnail,
         channelTitle: videoInfo.channelTitle
       });
     } catch (error) {
-      socket.emit('add-to-playlist', {
+      socketRef.current.emit('add-to-playlist', {
         videoId,
         title: `YouTube Video (${videoId})`,
         thumbnail: `https://i.ytimg.com/vi/${videoId}/default.jpg`,
@@ -322,8 +368,8 @@ function Room() {
   };
 
   const handleAddFromSearch = (videoData) => {
-    if (!socket) return;
-    socket.emit('add-to-playlist', {
+    if (!socketRef.current) return;
+    socketRef.current.emit('add-to-playlist', {
       videoId: videoData.videoId,
       title: videoData.title,
       thumbnail: videoData.thumbnail,
@@ -332,41 +378,47 @@ function Room() {
   };
 
   const handlePlay = () => {
-    if (socket && playerRef.current) {
-      socket.emit('play-video');
+    if (socketRef.current && playerRef.current) {
+      socketRef.current.emit('play-video');
       setIsPlaying(true);
       playerRef.current.playVideo();
     }
   };
 
   const handlePause = () => {
-    if (socket && playerRef.current) {
-      socket.emit('pause-video');
+    if (socketRef.current && playerRef.current) {
+      socketRef.current.emit('pause-video');
       setIsPlaying(false);
       playerRef.current.pauseVideo();
     }
   };
 
   const handleNext = () => {
-    if (socket) {
-      socket.emit('next-video');
+    if (socketRef.current) {
+      socketRef.current.emit('next-video');
     }
   };
 
   const handleManualSync = () => {
-    if (socket && currentVideo) {
-      setIsSyncing(true);
-      setSyncStatus('Syncing...');
-      socket.emit('request-sync');
-      
-      setTimeout(() => {
-        if (isSyncing) {
-          setIsSyncing(false);
-          setSyncStatus('Sync timeout');
-          setTimeout(() => setSyncStatus('Connected'), 2000);
-        }
-      }, 5000);
+    if (!socketRef.current || !currentVideo || !playerInitializedRef.current) {
+      alert('Player not ready. Please wait for the video to load.');
+      return;
     }
+
+    console.log('Requesting sync...');
+    setIsSyncing(true);
+    setSyncStatus('Syncing...');
+    socketRef.current.emit('request-sync');
+    
+    // Fallback timeout
+    setTimeout(() => {
+      if (isSyncing) {
+        console.log('Sync timeout');
+        setIsSyncing(false);
+        setSyncStatus('Sync timeout - try again');
+        setTimeout(() => setSyncStatus('Connected'), 2000);
+      }
+    }, 5000);
   };
 
   const toggleVideoVisibility = () => {
@@ -379,6 +431,8 @@ function Room() {
       // Get current state before toggling
       const currentTime = playerRef.current.getCurrentTime();
       const wasPlaying = isPlaying;
+      
+      console.log('Toggling video visibility. Current time:', currentTime, 'Playing:', wasPlaying);
       
       // Update visibility state
       setShowVideo(newShowVideo);
@@ -397,7 +451,10 @@ function Room() {
         
         // Recreate player with new visibility
         const playerDiv = document.getElementById('youtube-player');
-        if (!playerDiv) return;
+        if (!playerDiv) {
+          isTogglingVideoRef.current = false;
+          return;
+        }
         
         playerRef.current = new window.YT.Player('youtube-player', {
           height: newShowVideo ? '400' : '0',
@@ -423,10 +480,12 @@ function Room() {
               if (wasPlaying) {
                 setTimeout(() => {
                   event.target.playVideo();
-                }, 100);
+                }, 200);
               }
               
-              isTogglingVideoRef.current = false;
+              setTimeout(() => {
+                isTogglingVideoRef.current = false;
+              }, 300);
             },
             onStateChange: onPlayerStateChange,
             onError: (error) => {
@@ -444,8 +503,8 @@ function Room() {
 
   const sendMessage = (e) => {
     e.preventDefault();
-    if (!newMessage.trim() || !socket) return;
-    socket.emit('send-message', { message: newMessage.trim() });
+    if (!newMessage.trim() || !socketRef.current) return;
+    socketRef.current.emit('send-message', { message: newMessage.trim() });
     setNewMessage('');
   };
 
@@ -510,7 +569,7 @@ function Room() {
             <button 
               className="btn btn-compact"
               onClick={handleManualSync}
-              disabled={isSyncing || !currentVideo}
+              disabled={isSyncing || !currentVideo || !playerInitializedRef.current}
               title="Sync with controller"
             >
               {isSyncing ? '⏳ Syncing...' : '🔄 Sync'}
@@ -611,6 +670,9 @@ function Room() {
                 placeholder="Or paste YouTube URL..."
                 value={videoUrl}
                 onChange={(e) => setVideoUrl(e.target.value)}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') addToPlaylist(e);
+                }}
                 style={{
                   flex: '1',
                   minWidth: '250px',
