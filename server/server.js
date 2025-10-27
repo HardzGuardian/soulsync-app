@@ -449,12 +449,16 @@ io.on('connection', (socket) => {
     room.currentController = userName;
 
     io.to(roomId).emit('playlist-updated', room.playlist);
+    
+    // Always emit video-changed, even if no video
     io.to(roomId).emit('video-changed', { 
       video: room.currentVideo, 
       isPlaying: room.isPlaying,
       currentTime: 0,
       controller: userName
     });
+    
+    console.log(`Next video in room ${roomId}:`, room.currentVideo?.title || 'No more videos');
   });
 
   socket.on('remove-from-playlist', (data) => {
