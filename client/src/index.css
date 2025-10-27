@@ -947,3 +947,21 @@ input:focus-visible {
     font-size: 11px;
   }
 }
+
+/* Hidden player container */
+#hidden-youtube-player {
+  position: absolute;
+  top: -9999px;
+  left: -9999px;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Ensure audio continues in background */
+.audio-continues {
+  position: fixed;
+  z-index: -1;
+  opacity: 0;
+}
