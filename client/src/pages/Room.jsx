@@ -351,6 +351,7 @@ function Room() {
     setHasVideo(true);
     setIsLoadingVideo(true);
 
+    // Save current time before destroying
     if (playerRef.current && playerInitializedRef.current) {
       try {
         if (typeof playerRef.current.getCurrentTime === 'function') {
@@ -365,6 +366,7 @@ function Room() {
       }
     }
 
+    // Destroy existing player
     if (playerRef.current) {
       try {
         if (typeof playerRef.current.destroy === 'function') {
@@ -376,85 +378,95 @@ function Room() {
       }
     }
 
-    const playerDiv = document.getElementById('youtube-player');
-    if (!playerDiv) {
-      console.error('Player div not found');
-      isCreatingPlayer.current = false;
-      setIsLoadingVideo(false);
-      return;
-    }
+    // Wait a bit before creating new player to ensure cleanup is complete
+    setTimeout(() => {
+      const playerDiv = document.getElementById('youtube-player');
+      if (!playerDiv) {
+        console.error('Player div not found');
+        isCreatingPlayer.current = false;
+        setIsLoadingVideo(false);
+        return;
+      }
 
-    playerDiv.innerHTML = '';
-
-    try {
-      console.log('Creating new player for video:', currentVideo.videoId, 'at time:', currentTimeRef.current);
+      // Create a new container div for the player
+      const playerContainer = document.createElement('div');
+      playerContainer.id = 'youtube-player-container';
       
-      playerRef.current = new window.YT.Player('youtube-player', {
-        height: '480',
-        width: '100%',
-        videoId: currentVideo.videoId,
-        playerVars: {
-          playsinline: 1,
-          enablejsapi: 1,
-          origin: window.location.origin,
-          autoplay: 0,
-          controls: 1,
-          rel: 0,
-          modestbranding: 1,
-          start: Math.floor(currentTimeRef.current)
-        },
-        events: {
-          onReady: (event) => {
-            console.log('Player ready! Video:', currentVideo.title, 'at time:', currentTimeRef.current);
-            playerInitializedRef.current = true;
-            isCreatingPlayer.current = false;
-            setHasVideo(true);
-            setIsLoadingVideo(false);
-            
-            // Apply video visibility immediately after player is ready
-            const iframe = document.querySelector('#youtube-player iframe');
-            if (iframe && !showVideo) {
-              iframe.style.height = '0px';
-            }
-            
-            try {
-              event.target.seekTo(currentTimeRef.current, true);
+      // Clear and add new container
+      playerDiv.innerHTML = '';
+      playerDiv.appendChild(playerContainer);
+
+      try {
+        console.log('Creating new player for video:', currentVideo.videoId, 'at time:', currentTimeRef.current);
+        
+        // Create player in the new container
+        playerRef.current = new window.YT.Player(playerContainer, {
+          height: '480',
+          width: '100%',
+          videoId: currentVideo.videoId,
+          playerVars: {
+            playsinline: 1,
+            enablejsapi: 1,
+            origin: window.location.origin,
+            autoplay: 0,
+            controls: 1,
+            rel: 0,
+            modestbranding: 1,
+            start: Math.floor(currentTimeRef.current)
+          },
+          events: {
+            onReady: (event) => {
+              console.log('Player ready! Video:', currentVideo.title, 'at time:', currentTimeRef.current);
+              playerInitializedRef.current = true;
+              isCreatingPlayer.current = false;
+              setHasVideo(true);
+              setIsLoadingVideo(false);
+              
+              // Apply video visibility immediately after player is ready
+              const iframe = playerContainer.querySelector('iframe');
+              if (iframe && !showVideo) {
+                iframe.style.height = '0px';
+              }
+              
+              try {
+                event.target.seekTo(currentTimeRef.current, true);
+                
+                setTimeout(() => {
+                  if (isPlaying) {
+                    console.log('Starting playback');
+                    event.target.playVideo();
+                  } else {
+                    console.log('Pausing playback');
+                    event.target.pauseVideo();
+                  }
+                }, 300);
+              } catch (err) {
+                console.error('Error in onReady:', err);
+              }
+            },
+            onStateChange: onPlayerStateChange,
+            onError: (error) => {
+              console.error('Player error:', error);
+              isCreatingPlayer.current = false;
+              playerInitializedRef.current = false;
+              setIsLoadingVideo(false);
               
               setTimeout(() => {
-                if (isPlaying) {
-                  console.log('Starting playback');
-                  event.target.playVideo();
-                } else {
-                  console.log('Pausing playback');
-                  event.target.pauseVideo();
+                if (currentVideo && !playerInitializedRef.current) {
+                  console.log('Retrying player creation after error');
+                  createPlayer();
                 }
-              }, 300);
-            } catch (err) {
-              console.error('Error in onReady:', err);
+              }, 2000);
             }
-          },
-          onStateChange: onPlayerStateChange,
-          onError: (error) => {
-            console.error('Player error:', error);
-            isCreatingPlayer.current = false;
-            playerInitializedRef.current = false;
-            setIsLoadingVideo(false);
-            
-            setTimeout(() => {
-              if (currentVideo && !playerInitializedRef.current) {
-                console.log('Retrying player creation after error');
-                createPlayer();
-              }
-            }, 2000);
           }
-        }
-      });
-    } catch (error) {
-      console.error('Error creating player:', error);
-      isCreatingPlayer.current = false;
-      playerInitializedRef.current = false;
-      setIsLoadingVideo(false);
-    }
+        });
+      } catch (error) {
+        console.error('Error creating player:', error);
+        isCreatingPlayer.current = false;
+        playerInitializedRef.current = false;
+        setIsLoadingVideo(false);
+      }
+    }, 100); // Small delay to ensure DOM cleanup is complete
   };
 
   const onPlayerStateChange = (event) => {
@@ -582,14 +594,12 @@ function Room() {
     // Just toggle iframe visibility without recreating player
     if (playerRef.current && playerInitializedRef.current) {
       try {
-        const iframe = document.querySelector('#youtube-player iframe');
+        const iframe = document.querySelector('#youtube-player-container iframe');
         if (iframe) {
           if (newShowVideo) {
-            // Show video
             console.log('Showing video player');
             iframe.style.height = '480px';
           } else {
-            // Hide video (audio mode)
             console.log('Hiding video player (audio mode)');
             iframe.style.height = '0px';
           }
