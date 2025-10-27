@@ -49,27 +49,6 @@ const users = new Map();
 const searchCache = new Map();
 const CACHE_DURATION = 5 * 60 * 1000;
 
-// Enhanced sync system
-function startSyncInterval(room) {
-  if (room.syncInterval) clearInterval(room.syncInterval);
-  
-  room.syncInterval = setInterval(() => {
-    if (room.users.size > 0 && room.currentVideo && room.isPlaying) {
-      // Calculate current time based on playback
-      const currentTime = room.currentTime + (Date.now() - room.lastUpdate) / 1000;
-      room.currentTime = currentTime;
-      room.lastUpdate = Date.now();
-      
-      // Broadcast sync to all clients every 5 seconds
-      io.to(room.id).emit('auto-sync', {
-        time: currentTime,
-        isPlaying: room.isPlaying,
-        videoId: room.currentVideo?.videoId
-      });
-    }
-  }, 5000); // Sync every 5 seconds
-}
-
 // Room management
 function createRoom(roomName, createdBy) {
   const roomId = uuidv4().substring(0, 8);
@@ -77,18 +56,14 @@ function createRoom(roomName, createdBy) {
     id: roomId,
     name: roomName,
     createdBy,
-    users: new Set(),
+    users: new Map(), // Use Map to track socketId -> userName
     playlist: [],
     currentVideo: null,
     isPlaying: false,
     currentTime: 0,
     lastUpdate: Date.now(),
     createdAt: new Date(),
-    lastSync: Date.now(),
-    syncInterval: null,
     messages: [],
-    // Add background playback state
-    backgroundPlayback: true
   };
   rooms.set(roomId, room);
   return room;
@@ -99,10 +74,6 @@ function getRoom(roomId) {
 }
 
 function deleteRoom(roomId) {
-  const room = rooms.get(roomId);
-  if (room && room.syncInterval) {
-    clearInterval(room.syncInterval);
-  }
   rooms.delete(roomId);
 }
 
@@ -259,13 +230,23 @@ app.get('*', (req, res) => {
   res.sendFile('index.html', { root: '../client/dist' });
 });
 
-// Socket.io
+// Socket.io with proper configuration
 const io = new Server(server, {
   cors: {
     origin: corsOptions.origin,
-    methods: ["GET", "POST"]
-  }
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  // Add server-side configuration to prevent spam
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true,
+  },
+  allowEIO3: true
 });
+
+// Track user rooms to prevent duplicate joins
+const userRooms = new Map();
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -280,9 +261,39 @@ io.on('connection', (socket) => {
       return;
     }
 
-    room.users.add(socket.id);
-    users.set(socket.id, { roomId, userName });
+    // Check if user is already in this room
+    const currentUserRoom = userRooms.get(socket.id);
+    if (currentUserRoom === roomId) {
+      console.log(`User ${userName} already in room ${roomId}, skipping duplicate join`);
+      // Still send room state but don't create duplicate system message
+      socket.emit('room-state', {
+        playlist: room.playlist,
+        currentVideo: room.currentVideo,
+        isPlaying: room.isPlaying,
+        currentTime: room.currentTime,
+        messages: room.messages || []
+      });
+      return;
+    }
 
+    // Remove from previous room if any
+    if (currentUserRoom) {
+      const previousRoom = getRoom(currentUserRoom);
+      if (previousRoom) {
+        previousRoom.users.delete(socket.id);
+        socket.leave(currentUserRoom);
+        
+        // Notify previous room
+        socket.to(currentUserRoom).emit('user-left', { 
+          userName: userName, 
+          userCount: previousRoom.users.size 
+        });
+      }
+    }
+
+    // Join new room
+    room.users.set(socket.id, userName);
+    userRooms.set(socket.id, roomId);
     socket.join(roomId);
 
     // Send room state including chat history
@@ -291,17 +302,14 @@ io.on('connection', (socket) => {
       currentVideo: room.currentVideo,
       isPlaying: room.isPlaying,
       currentTime: room.currentTime,
-      messages: room.messages || [],
-      backgroundPlayback: room.backgroundPlayback
+      messages: room.messages || []
     });
 
-    // Start sync interval if not already running and there are users
-    if (!room.syncInterval && room.users.size > 0) {
-      startSyncInterval(room);
-    }
-
-    // Notify others
-    socket.to(roomId).emit('user-joined', { userName, userCount: room.users.size });
+    // Notify others (except the joining user)
+    socket.to(roomId).emit('user-joined', { 
+      userName: userName, 
+      userCount: room.users.size 
+    });
     
     // Send system message
     const systemMessage = {
@@ -316,17 +324,21 @@ io.on('connection', (socket) => {
     if (room.messages.length > 100) {
       room.messages = room.messages.slice(-100);
     }
+    
+    // Broadcast to all including the joining user
     io.to(roomId).emit('new-message', systemMessage);
     
-    console.log(`User ${userName} joined room ${roomId}`);
+    console.log(`User ${userName} joined room ${roomId} (Users: ${room.users.size})`);
   });
 
   socket.on('add-to-playlist', (data) => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
 
-    const room = getRoom(user.roomId);
+    const room = getRoom(roomId);
     if (!room) return;
+
+    const userName = room.users.get(socket.id);
 
     const video = {
       id: uuidv4(),
@@ -334,7 +346,7 @@ io.on('connection', (socket) => {
       title: data.title,
       thumbnail: data.thumbnail,
       channelTitle: data.channelTitle,
-      addedBy: user.userName,
+      addedBy: userName,
       addedAt: new Date()
     };
 
@@ -347,9 +359,9 @@ io.on('connection', (socket) => {
       room.lastUpdate = Date.now();
     }
 
-    io.to(user.roomId).emit('playlist-updated', room.playlist);
+    io.to(roomId).emit('playlist-updated', room.playlist);
     if (room.currentVideo === video) {
-      io.to(user.roomId).emit('video-changed', { 
+      io.to(roomId).emit('video-changed', { 
         video: room.currentVideo, 
         isPlaying: room.isPlaying 
       });
@@ -357,54 +369,49 @@ io.on('connection', (socket) => {
   });
 
   socket.on('play-video', () => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
 
-    const room = getRoom(user.roomId);
+    const room = getRoom(roomId);
     if (!room) return;
 
     room.isPlaying = true;
     room.lastUpdate = Date.now();
     
-    // Start sync interval if not already running
-    if (!room.syncInterval) {
-      startSyncInterval(room);
-    }
-    
-    socket.to(user.roomId).emit('video-played');
+    socket.to(roomId).emit('video-played');
   });
 
   socket.on('pause-video', () => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
 
-    const room = getRoom(user.roomId);
+    const room = getRoom(roomId);
     if (!room) return;
 
     room.isPlaying = false;
     room.lastUpdate = Date.now();
     
-    socket.to(user.roomId).emit('video-paused');
+    socket.to(roomId).emit('video-paused');
   });
 
   socket.on('seek-video', (data) => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
 
-    const room = getRoom(user.roomId);
+    const room = getRoom(roomId);
     if (!room) return;
 
     room.currentTime = data.time;
     room.lastUpdate = Date.now();
     
-    socket.to(user.roomId).emit('video-seeked', { time: data.time });
+    socket.to(roomId).emit('video-seeked', { time: data.time });
   });
 
   socket.on('next-video', () => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
 
-    const room = getRoom(user.roomId);
+    const room = getRoom(roomId);
     if (!room || room.playlist.length === 0) return;
 
     if (room.currentVideo) {
@@ -416,71 +423,26 @@ io.on('connection', (socket) => {
     room.currentTime = 0;
     room.lastUpdate = Date.now();
 
-    io.to(user.roomId).emit('playlist-updated', room.playlist);
-    io.to(user.roomId).emit('video-changed', { 
+    io.to(roomId).emit('playlist-updated', room.playlist);
+    io.to(roomId).emit('video-changed', { 
       video: room.currentVideo, 
       isPlaying: room.isPlaying 
     });
   });
 
-  // Enhanced sync system
-  socket.on('request-sync', () => {
-    const user = users.get(socket.id);
-    if (!user) return;
-
-    const room = getRoom(user.roomId);
-    if (!room) return;
-
-    let calculatedTime = room.currentTime;
-    if (room.isPlaying) {
-      calculatedTime += (Date.now() - room.lastUpdate) / 1000;
-    }
-
-    socket.emit('sync-response', {
-      time: calculatedTime,
-      isPlaying: room.isPlaying,
-      videoId: room.currentVideo?.videoId
-    });
-  });
-
-  // Background playback events
-  socket.on('toggle-background-playback', (data) => {
-    const user = users.get(socket.id);
-    if (!user) return;
-
-    const room = getRoom(user.roomId);
-    if (!room) return;
-
-    room.backgroundPlayback = data.enabled;
-    
-    // Broadcast to all room members
-    io.to(user.roomId).emit('background-playback-toggled', {
-      enabled: room.backgroundPlayback,
-      updatedBy: user.userName
-    });
-  });
-
-  socket.on('toggle-player-visibility', (data) => {
-    const user = users.get(socket.id);
-    if (!user) return;
-
-    socket.to(user.roomId).emit('player-visibility-changed', {
-      visible: data.visible,
-      userName: user.userName
-    });
-  });
-
   // Chat functionality
   socket.on('send-message', (data) => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
 
-    const room = getRoom(user.roomId);
+    const room = getRoom(roomId);
     if (!room) return;
+
+    const userName = room.users.get(socket.id);
 
     const message = {
       id: uuidv4(),
-      userName: user.userName,
+      userName: userName,
       message: data.message,
       timestamp: new Date(),
       type: 'user'
@@ -493,53 +455,54 @@ io.on('connection', (socket) => {
     }
 
     // Broadcast to all room members
-    io.to(user.roomId).emit('new-message', message);
+    io.to(roomId).emit('new-message', message);
   });
 
-  socket.on('disconnect', () => {
-    const user = users.get(socket.id);
-    if (user) {
-      const room = getRoom(user.roomId);
+  socket.on('disconnect', (reason) => {
+    console.log('User disconnected:', socket.id, 'Reason:', reason);
+    
+    const roomId = userRooms.get(socket.id);
+    if (roomId) {
+      const room = getRoom(roomId);
       if (room) {
+        const userName = room.users.get(socket.id);
         room.users.delete(socket.id);
         
-        // Send system message
-        const systemMessage = {
-          id: uuidv4(),
-          userName: 'System',
-          message: `${user.userName} left the room`,
-          timestamp: new Date(),
-          type: 'system'
-        };
-        
-        room.messages.push(systemMessage);
-        if (room.messages.length > 100) {
-          room.messages = room.messages.slice(-100);
-        }
-        socket.to(user.roomId).emit('new-message', systemMessage);
-        
-        socket.to(user.roomId).emit('user-left', { 
-          userName: user.userName, 
-          userCount: room.users.size 
-        });
-
-        // Stop sync interval if room is empty
-        if (room.users.size === 0 && room.syncInterval) {
-          clearInterval(room.syncInterval);
-          room.syncInterval = null;
-        }
-        
-        // Delete room if empty for more than 1 minute (optional)
-        setTimeout(() => {
-          const currentRoom = getRoom(user.roomId);
-          if (currentRoom && currentRoom.users.size === 0) {
-            deleteRoom(user.roomId);
+        // Send system message only if user was actually in the room
+        if (userName) {
+          const systemMessage = {
+            id: uuidv4(),
+            userName: 'System',
+            message: `${userName} left the room`,
+            timestamp: new Date(),
+            type: 'system'
+          };
+          
+          room.messages.push(systemMessage);
+          if (room.messages.length > 100) {
+            room.messages = room.messages.slice(-100);
           }
-        }, 60000);
+          
+          socket.to(roomId).emit('new-message', systemMessage);
+          socket.to(roomId).emit('user-left', { 
+            userName: userName, 
+            userCount: room.users.size 
+          });
+        }
+
+        // Delete room if empty for more than 1 minute
+        if (room.users.size === 0) {
+          setTimeout(() => {
+            const currentRoom = getRoom(roomId);
+            if (currentRoom && currentRoom.users.size === 0) {
+              console.log(`Deleting empty room: ${roomId}`);
+              deleteRoom(roomId);
+            }
+          }, 60000);
+        }
       }
-      users.delete(socket.id);
+      userRooms.delete(socket.id);
     }
-    console.log('User disconnected:', socket.id);
   });
 });
 

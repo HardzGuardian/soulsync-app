@@ -67,16 +67,13 @@ body {
   transition: all 0.3s ease;
 }
 
-.player-container.mini {
-  max-width: 320px;
-  margin: 0 auto 24px auto;
-}
-
 .controls {
   display: flex;
   gap: 12px;
   margin: 24px 0;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
 }
 
 .btn {
@@ -92,18 +89,39 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 120px;
+  justify-content: center;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 5px 15px rgba(99, 102, 241, 0.4);
 }
 
 .btn:disabled {
-  background: #666;
-  transform: none;
-  box-shadow: none;
-  cursor: not-allowed;
+  background: #666 !important;
+  transform: none !important;
+  box-shadow: none !important;
+  cursor: not-allowed !important;
+  opacity: 0.6 !important;
+}
+
+/* Play button specific styles */
+.btn-play {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+}
+
+.btn-play:hover:not(:disabled) {
+  box-shadow: 0 5px 15px rgba(16, 185, 129, 0.4);
+}
+
+/* Pause button specific styles */
+.btn-pause {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+}
+
+.btn-pause:hover:not(:disabled) {
+  box-shadow: 0 5px 15px rgba(239, 68, 68, 0.4);
 }
 
 .btn-secondary {
@@ -111,7 +129,7 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.15);
   box-shadow: 0 5px 15px rgba(255, 255, 255, 0.1);
 }
@@ -119,6 +137,7 @@ body {
 .btn-compact {
   padding: 8px 16px;
   font-size: 12px;
+  min-width: auto;
 }
 
 .playlist {
@@ -186,56 +205,29 @@ body {
   font-weight: 600;
 }
 
-/* Background Playback Styles */
-.background-status {
-  position: fixed;
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0, 0, 0, 0.9);
-  padding: 12px 20px;
-  border-radius: 25px;
-  border: 2px solid #6366f1;
+/* Player status indicator */
+.player-status {
   display: flex;
   align-items: center;
-  gap: 12px;
-  z-index: 1000;
-  backdrop-filter: blur(10px);
-  animation: slideUp 0.3s ease;
-}
-
-@keyframes slideUp {
-  from {
-    transform: translateX(-50%) translateY(100px);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(-50%) translateY(0);
-    opacity: 1;
-  }
-}
-
-.player-controls-compact {
-  display: flex;
   gap: 8px;
-  margin-bottom: 15px;
-  flex-wrap: wrap;
-  align-items: center;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: auto;
 }
 
-.now-playing-info {
-  background: rgba(99, 102, 241, 0.1);
-  padding: 12px 16px;
-  border-radius: 10px;
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+.status-playing {
+  color: #10b981;
 }
 
-.now-playing-info.hidden-player {
-  margin-bottom: 0;
+.status-paused {
+  color: #ef4444;
+}
+
+.status-stopped {
+  color: #6b7280;
 }
 
 /* Search Modal Styles */
@@ -478,6 +470,18 @@ body {
   background: rgba(255, 255, 255, 0.05);
   border-radius: 8px;
   border-left: 3px solid transparent;
+  animation: messageSlideIn 0.3s ease;
+}
+
+@keyframes messageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .chat-message.system {
@@ -526,12 +530,112 @@ body {
   background: rgba(255, 255, 255, 0.05);
   color: white;
   font-size: 14px;
+  transition: all 0.3s ease;
 }
 
 .chat-input:focus {
   outline: none;
   border-color: #6366f1;
   background: rgba(255, 255, 255, 0.08);
+}
+
+/* YouTube Player Container */
+.youtube-player-container {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+
+.youtube-player-placeholder {
+  height: 400px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.02);
+  color: #a1a1aa;
+  font-size: 18px;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.youtube-player-placeholder-icon {
+  font-size: 48px;
+}
+
+/* Control states */
+.control-active {
+  transform: scale(0.95);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.control-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Room header improvements */
+.room-header-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.room-title {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 800;
+}
+
+/* Video info display */
+.video-info-display {
+  background: rgba(99, 102, 241, 0.1);
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  margin-bottom: 16px;
+}
+
+.video-info-display h3 {
+  color: #f8fafc;
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+
+.video-info-display p {
+  color: #a1a1aa;
+  margin: 0;
+  font-size: 14px;
+}
+
+/* Button states for better UX */
+.btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.btn-loading {
+  position: relative;
+  color: transparent;
+}
+
+.btn-loading::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 2px solid transparent;
+  border-top: 2px solid white;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
 }
 
 /* Mobile optimizations */
@@ -548,6 +652,8 @@ body {
     flex: 1;
     min-width: 140px;
     justify-content: center;
+    padding: 10px 16px;
+    font-size: 13px;
   }
   
   .search-result-item {
@@ -568,29 +674,50 @@ body {
     height: 400px;
   }
   
-  .background-status {
-    bottom: 10px;
-    left: 10px;
-    right: 10px;
-    transform: none;
-    padding: 10px 15px;
+  .youtube-player-placeholder {
+    height: 250px;
+    font-size: 16px;
   }
   
-  .player-controls-compact {
+  .youtube-player-placeholder-icon {
+    font-size: 36px;
+  }
+  
+  .room-title {
+    font-size: 1.5rem;
+  }
+  
+  .control-group {
     justify-content: center;
-  }
-  
-  .player-container.mini {
-    max-width: 100%;
   }
 }
 
-/* PWA Styles for background playback */
-@media (display-mode: standalone) {
-  body {
-    -webkit-user-select: none;
-    -webkit-touch-callout: none;
-    -webkit-tap-highlight-color: transparent;
+@media (max-width: 480px) {
+  .container {
+    padding: 12px;
+  }
+  
+  .btn {
+    min-width: 120px;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+  
+  .controls {
+    gap: 8px;
+  }
+  
+  .chat-container {
+    height: 350px;
+  }
+  
+  .youtube-player-placeholder {
+    height: 200px;
+    font-size: 14px;
+  }
+  
+  .youtube-player-placeholder-icon {
+    font-size: 32px;
   }
 }
 
@@ -611,4 +738,69 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #8b5cf6;
+}
+
+/* Focus styles for accessibility */
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* Selection styles */
+::selection {
+  background: rgba(99, 102, 241, 0.3);
+  color: white;
+}
+
+/* Loading animation for room cards */
+.room-card-loading {
+  position: relative;
+  overflow: hidden;
+}
+
+.room-card-loading::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.1),
+    transparent
+  );
+  animation: loading 1.5s infinite;
+}
+
+@keyframes loading {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+/* Error states */
+.error-state {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(220, 38, 38, 0.1) 100%);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+  padding: 16px;
+  border-radius: 12px;
+  text-align: center;
+  margin: 16px 0;
+}
+
+.success-state {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(5, 150, 105, 0.1) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #10b981;
+  padding: 16px;
+  border-radius: 12px;
+  text-align: center;
+  margin: 16px 0;
 }
