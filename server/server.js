@@ -18,7 +18,7 @@ const corsOptions = {
       'http://localhost:5173',
       'http://localhost:3000',
       'http://127.0.0.1:5173',
-      'https://soulsync-production.up.railway.app',
+      'https://soulsync-app-production.up.railway.app',
       /\.railway\.app$/
     ];
     
@@ -49,6 +49,27 @@ const users = new Map();
 const searchCache = new Map();
 const CACHE_DURATION = 5 * 60 * 1000;
 
+// Enhanced sync system
+function startSyncInterval(room) {
+  if (room.syncInterval) clearInterval(room.syncInterval);
+  
+  room.syncInterval = setInterval(() => {
+    if (room.users.size > 0 && room.currentVideo && room.isPlaying) {
+      // Calculate current time based on playback
+      const currentTime = room.currentTime + (Date.now() - room.lastUpdate) / 1000;
+      room.currentTime = currentTime;
+      room.lastUpdate = Date.now();
+      
+      // Broadcast sync to all clients every 5 seconds
+      io.to(room.id).emit('auto-sync', {
+        time: currentTime,
+        isPlaying: room.isPlaying,
+        videoId: room.currentVideo?.videoId
+      });
+    }
+  }, 5000); // Sync every 5 seconds
+}
+
 // Room management
 function createRoom(roomName, createdBy) {
   const roomId = uuidv4().substring(0, 8);
@@ -62,7 +83,12 @@ function createRoom(roomName, createdBy) {
     isPlaying: false,
     currentTime: 0,
     lastUpdate: Date.now(),
-    createdAt: new Date()
+    createdAt: new Date(),
+    lastSync: Date.now(),
+    syncInterval: null,
+    messages: [],
+    // Add background playback state
+    backgroundPlayback: true
   };
   rooms.set(roomId, room);
   return room;
@@ -73,6 +99,10 @@ function getRoom(roomId) {
 }
 
 function deleteRoom(roomId) {
+  const room = rooms.get(roomId);
+  if (room && room.syncInterval) {
+    clearInterval(room.syncInterval);
+  }
   rooms.delete(roomId);
 }
 
@@ -255,14 +285,38 @@ io.on('connection', (socket) => {
 
     socket.join(roomId);
 
+    // Send room state including chat history
     socket.emit('room-state', {
       playlist: room.playlist,
       currentVideo: room.currentVideo,
       isPlaying: room.isPlaying,
-      currentTime: room.currentTime
+      currentTime: room.currentTime,
+      messages: room.messages || [],
+      backgroundPlayback: room.backgroundPlayback
     });
 
+    // Start sync interval if not already running and there are users
+    if (!room.syncInterval && room.users.size > 0) {
+      startSyncInterval(room);
+    }
+
+    // Notify others
     socket.to(roomId).emit('user-joined', { userName, userCount: room.users.size });
+    
+    // Send system message
+    const systemMessage = {
+      id: uuidv4(),
+      userName: 'System',
+      message: `${userName} joined the room`,
+      timestamp: new Date(),
+      type: 'system'
+    };
+    
+    room.messages.push(systemMessage);
+    if (room.messages.length > 100) {
+      room.messages = room.messages.slice(-100);
+    }
+    io.to(roomId).emit('new-message', systemMessage);
     
     console.log(`User ${userName} joined room ${roomId}`);
   });
@@ -290,6 +344,7 @@ io.on('connection', (socket) => {
       room.currentVideo = video;
       room.isPlaying = true;
       room.currentTime = 0;
+      room.lastUpdate = Date.now();
     }
 
     io.to(user.roomId).emit('playlist-updated', room.playlist);
@@ -310,6 +365,11 @@ io.on('connection', (socket) => {
 
     room.isPlaying = true;
     room.lastUpdate = Date.now();
+    
+    // Start sync interval if not already running
+    if (!room.syncInterval) {
+      startSyncInterval(room);
+    }
     
     socket.to(user.roomId).emit('video-played');
   });
@@ -363,7 +423,8 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('sync-request', (data) => {
+  // Enhanced sync system
+  socket.on('request-sync', () => {
     const user = users.get(socket.id);
     if (!user) return;
 
@@ -377,8 +438,62 @@ io.on('connection', (socket) => {
 
     socket.emit('sync-response', {
       time: calculatedTime,
-      isPlaying: room.isPlaying
+      isPlaying: room.isPlaying,
+      videoId: room.currentVideo?.videoId
     });
+  });
+
+  // Background playback events
+  socket.on('toggle-background-playback', (data) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+
+    const room = getRoom(user.roomId);
+    if (!room) return;
+
+    room.backgroundPlayback = data.enabled;
+    
+    // Broadcast to all room members
+    io.to(user.roomId).emit('background-playback-toggled', {
+      enabled: room.backgroundPlayback,
+      updatedBy: user.userName
+    });
+  });
+
+  socket.on('toggle-player-visibility', (data) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+
+    socket.to(user.roomId).emit('player-visibility-changed', {
+      visible: data.visible,
+      userName: user.userName
+    });
+  });
+
+  // Chat functionality
+  socket.on('send-message', (data) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+
+    const room = getRoom(user.roomId);
+    if (!room) return;
+
+    const message = {
+      id: uuidv4(),
+      userName: user.userName,
+      message: data.message,
+      timestamp: new Date(),
+      type: 'user'
+    };
+
+    // Store message in room (limit to 100 messages)
+    room.messages.push(message);
+    if (room.messages.length > 100) {
+      room.messages = room.messages.slice(-100);
+    }
+
+    // Broadcast to all room members
+    io.to(user.roomId).emit('new-message', message);
   });
 
   socket.on('disconnect', () => {
@@ -388,14 +503,39 @@ io.on('connection', (socket) => {
       if (room) {
         room.users.delete(socket.id);
         
+        // Send system message
+        const systemMessage = {
+          id: uuidv4(),
+          userName: 'System',
+          message: `${user.userName} left the room`,
+          timestamp: new Date(),
+          type: 'system'
+        };
+        
+        room.messages.push(systemMessage);
+        if (room.messages.length > 100) {
+          room.messages = room.messages.slice(-100);
+        }
+        socket.to(user.roomId).emit('new-message', systemMessage);
+        
         socket.to(user.roomId).emit('user-left', { 
           userName: user.userName, 
           userCount: room.users.size 
         });
 
-        if (room.users.size === 0) {
-          deleteRoom(user.roomId);
+        // Stop sync interval if room is empty
+        if (room.users.size === 0 && room.syncInterval) {
+          clearInterval(room.syncInterval);
+          room.syncInterval = null;
         }
+        
+        // Delete room if empty for more than 1 minute (optional)
+        setTimeout(() => {
+          const currentRoom = getRoom(user.roomId);
+          if (currentRoom && currentRoom.users.size === 0) {
+            deleteRoom(user.roomId);
+          }
+        }, 60000);
       }
       users.delete(socket.id);
     }
