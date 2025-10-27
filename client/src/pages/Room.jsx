@@ -15,21 +15,21 @@ function Room() {
   const [currentVideo, setCurrentVideo] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [videoUrl, setVideoUrl] = useState('');
-  const [syncStatus, setSyncStatus] = useState('Connecting...');
+  const [connectionStatus, setConnectionStatus] = useState('Connecting...');
   const [showSearch, setShowSearch] = useState(false);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [showChat, setShowChat] = useState(true);
   const [showVideo, setShowVideo] = useState(true);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [currentController, setCurrentController] = useState(null);
+  const [users, setUsers] = useState([]);
   
   const playerRef = useRef(null);
   const chatContainerRef = useRef(null);
   const hasJoinedRef = useRef(false);
   const playerInitializedRef = useRef(false);
-  const isTogglingVideoRef = useRef(false);
   const socketRef = useRef(null);
+  const ignoreNextStateChange = useRef(false);
 
   // Setup socket connection
   useEffect(() => {
@@ -46,7 +46,7 @@ function Room() {
 
     const newSocket = io(socketUrl, {
       reconnection: true,
-      reconnectionAttempts: 3,
+      reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       timeout: 20000,
@@ -58,8 +58,8 @@ function Room() {
     socketRef.current = newSocket;
 
     newSocket.on('connect', () => {
-      console.log('Socket connected:', newSocket.id);
-      setSyncStatus('Connected');
+      console.log('Connected to server');
+      setConnectionStatus('Connected');
       
       if (!hasJoinedRef.current) {
         newSocket.emit('join-room', { roomId, userName });
@@ -68,149 +68,101 @@ function Room() {
     });
 
     newSocket.on('disconnect', (reason) => {
-      console.log('Socket disconnected:', reason);
-      setSyncStatus('Disconnected');
+      console.log('Disconnected:', reason);
+      setConnectionStatus('Disconnected - Reconnecting...');
     });
 
     newSocket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-      setSyncStatus('Connection Error');
+      console.error('Connection error:', error);
+      setConnectionStatus('Connection Error');
     });
 
     newSocket.on('room-state', (state) => {
-      console.log('Received room state:', state);
+      console.log('Room state received:', state);
       setPlaylist(state.playlist || []);
       setCurrentVideo(state.currentVideo);
       setIsPlaying(state.isPlaying || false);
       setMessages(state.messages || []);
       setCurrentController(state.currentController || null);
+      setUsers(state.users || []);
     });
 
     newSocket.on('playlist-updated', (updatedPlaylist) => {
       setPlaylist(updatedPlaylist);
     });
     
-    newSocket.on('video-changed', ({ video, isPlaying: playing, controller }) => {
+    newSocket.on('video-changed', ({ video, isPlaying: playing, currentTime, controller }) => {
       console.log('Video changed:', video?.title);
       setCurrentVideo(video);
       setIsPlaying(playing);
       setCurrentController(controller);
       playerInitializedRef.current = false;
-    });
-
-    newSocket.on('video-played', ({ controller }) => {
-      console.log('Video played by:', controller);
-      setIsPlaying(true);
-      setCurrentController(controller);
-      if (playerRef.current && !isTogglingVideoRef.current) {
-        try {
-          playerRef.current.playVideo();
-        } catch (e) {
-          console.error('Error playing video:', e);
-        }
+      
+      // Recreate player for new video
+      if (video && playerRef.current) {
+        ignoreNextStateChange.current = true;
+        playerRef.current.loadVideoById(video.videoId, currentTime || 0);
+        
+        setTimeout(() => {
+          if (playing && playerRef.current) {
+            playerRef.current.playVideo();
+          }
+          ignoreNextStateChange.current = false;
+        }, 500);
       }
     });
 
-    newSocket.on('video-paused', ({ controller }) => {
-      console.log('Video paused by:', controller);
+    newSocket.on('video-played', ({ controller, currentTime }) => {
+      console.log('Play command from:', controller, 'at', currentTime);
+      setIsPlaying(true);
+      setCurrentController(controller);
+      
+      if (playerRef.current && playerInitializedRef.current) {
+        ignoreNextStateChange.current = true;
+        if (currentTime !== undefined) {
+          playerRef.current.seekTo(currentTime, true);
+        }
+        playerRef.current.playVideo();
+        setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+      }
+    });
+
+    newSocket.on('video-paused', ({ controller, currentTime }) => {
+      console.log('Pause command from:', controller, 'at', currentTime);
       setIsPlaying(false);
       setCurrentController(controller);
-      if (playerRef.current && !isTogglingVideoRef.current) {
-        try {
-          playerRef.current.pauseVideo();
-        } catch (e) {
-          console.error('Error pausing video:', e);
+      
+      if (playerRef.current && playerInitializedRef.current) {
+        ignoreNextStateChange.current = true;
+        if (currentTime !== undefined) {
+          playerRef.current.seekTo(currentTime, true);
         }
+        playerRef.current.pauseVideo();
+        setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
       }
     });
 
     newSocket.on('video-seeked', ({ time, controller }) => {
-      console.log('Video seeked to:', time, 'by:', controller);
+      console.log('Seek command from:', controller, 'to', time);
       setCurrentController(controller);
-      if (playerRef.current && !isTogglingVideoRef.current) {
-        try {
-          playerRef.current.seekTo(time, true);
-        } catch (e) {
-          console.error('Error seeking video:', e);
-        }
-      }
-    });
-
-    newSocket.on('sync-response', ({ time, isPlaying: serverPlaying, videoId, controller }) => {
-      console.log('Sync response received:', { time, serverPlaying, videoId, controller });
       
-      // Always reset syncing state
-      setIsSyncing(false);
-      
-      if (!currentVideo || currentVideo.videoId !== videoId) {
-        console.log('Video ID mismatch, skipping sync');
-        setSyncStatus('Video changed');
-        setTimeout(() => setSyncStatus('Connected'), 2000);
-        return;
-      }
-
       if (playerRef.current && playerInitializedRef.current) {
-        try {
-          console.log('Syncing player to:', time, serverPlaying ? 'playing' : 'paused');
-          playerRef.current.seekTo(time, true);
-          
-          // Wait a moment for seek to complete
-          setTimeout(() => {
-            if (serverPlaying) {
-              playerRef.current.playVideo();
-            } else {
-              playerRef.current.pauseVideo();
-            }
-          }, 100);
-          
-          setIsPlaying(serverPlaying);
-          setCurrentController(controller);
-          setSyncStatus(`Synced with ${controller}`);
-          setTimeout(() => setSyncStatus('Connected'), 3000);
-        } catch (e) {
-          console.error('Error during sync:', e);
-          setSyncStatus('Sync failed');
-          setTimeout(() => setSyncStatus('Connected'), 2000);
-        }
-      } else {
-        console.log('Player not ready for sync');
-        setSyncStatus('Player not ready');
-        setTimeout(() => setSyncStatus('Connected'), 2000);
+        ignoreNextStateChange.current = true;
+        playerRef.current.seekTo(time, true);
+        setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
       }
-    });
-
-    newSocket.on('controller-updated', ({ controller }) => {
-      setCurrentController(controller);
     });
 
     newSocket.on('new-message', (message) => {
       setMessages(prev => [...prev, message]);
     });
 
-    newSocket.on('user-joined', ({ userName: joinedUser }) => {
-      if (joinedUser !== userName) {
-        const systemMessage = {
-          id: Date.now().toString() + Math.random(),
-          userName: 'System',
-          message: `${joinedUser} joined the room`,
-          timestamp: new Date(),
-          type: 'system'
-        };
-        setMessages(prev => [...prev, systemMessage]);
-      }
+    newSocket.on('user-joined', ({ userName: joinedUser, users: updatedUsers }) => {
+      setUsers(updatedUsers || []);
     });
 
-    newSocket.on('user-left', ({ userName: leftUser }) => {
-      if (leftUser !== userName) {
-        const systemMessage = {
-          id: Date.now().toString() + Math.random(),
-          userName: 'System',
-          message: `${leftUser} left the room`,
-          timestamp: new Date(),
-          type: 'system'
-        };
-        setMessages(prev => [...prev, systemMessage]);
-      }
+    newSocket.on('user-left', ({ userName: leftUser, users: updatedUsers }) => {
+      setUsers(updatedUsers || []);
     });
 
     newSocket.on('error', (error) => {
@@ -227,7 +179,7 @@ function Room() {
       socketRef.current = null;
       hasJoinedRef.current = false;
     };
-  }, [roomId, userName, navigate, currentVideo]);
+  }, [roomId, userName, navigate]);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -238,13 +190,13 @@ function Room() {
 
   // Initialize YouTube Player
   useEffect(() => {
-    if (currentVideo && !playerInitializedRef.current && !isTogglingVideoRef.current) {
+    if (currentVideo && !playerInitializedRef.current) {
       initializePlayer();
     }
   }, [currentVideo, showVideo]);
 
   const initializePlayer = () => {
-    if (!currentVideo || isTogglingVideoRef.current) return;
+    if (!currentVideo) return;
 
     if (!window.YT) {
       const tag = document.createElement('script');
@@ -261,7 +213,7 @@ function Room() {
   };
 
   const createPlayer = () => {
-    if (!currentVideo || isTogglingVideoRef.current) return;
+    if (!currentVideo) return;
 
     if (playerRef.current) {
       try { 
@@ -272,22 +224,19 @@ function Room() {
     }
 
     const playerDiv = document.getElementById('youtube-player');
-    if (!playerDiv) {
-      console.error('Player div not found');
-      return;
-    }
+    if (!playerDiv) return;
 
     try {
       playerRef.current = new window.YT.Player('youtube-player', {
-        height: showVideo ? '400' : '0',
-        width: showVideo ? '100%' : '0',
+        height: showVideo ? '480' : '0',
+        width: '100%',
         videoId: currentVideo.videoId,
         playerVars: {
           playsinline: 1,
           enablejsapi: 1,
           origin: window.location.origin,
           autoplay: isPlaying ? 1 : 0,
-          controls: showVideo ? 1 : 0,
+          controls: 1,
           rel: 0,
           modestbranding: 1
         },
@@ -296,9 +245,7 @@ function Room() {
             console.log('Player ready');
             playerInitializedRef.current = true;
             if (isPlaying) {
-              setTimeout(() => {
-                event.target.playVideo();
-              }, 100);
+              setTimeout(() => event.target.playVideo(), 200);
             }
           },
           onStateChange: onPlayerStateChange,
@@ -313,21 +260,20 @@ function Room() {
   };
 
   const onPlayerStateChange = (event) => {
-    if (isTogglingVideoRef.current) return;
+    if (ignoreNextStateChange.current) return;
 
     if (event.data === window.YT.PlayerState.PLAYING) {
-      if (!isPlaying) {
-        setIsPlaying(true);
-        if (socketRef.current) socketRef.current.emit('play-video');
+      if (!isPlaying && socketRef.current) {
+        socketRef.current.emit('play-video');
       }
     } else if (event.data === window.YT.PlayerState.PAUSED) {
-      if (isPlaying) {
-        setIsPlaying(false);
-        if (socketRef.current) socketRef.current.emit('pause-video');
+      if (isPlaying && socketRef.current) {
+        socketRef.current.emit('pause-video');
       }
     } else if (event.data === window.YT.PlayerState.ENDED) {
-      setIsPlaying(false);
-      if (socketRef.current) socketRef.current.emit('next-video');
+      if (socketRef.current) {
+        socketRef.current.emit('next-video');
+      }
     }
   };
 
@@ -375,130 +321,23 @@ function Room() {
       thumbnail: videoData.thumbnail,
       channelTitle: videoData.channelTitle
     });
+    setShowSearch(false);
   };
 
-  const handlePlay = () => {
-    if (socketRef.current && playerRef.current) {
-      socketRef.current.emit('play-video');
-      setIsPlaying(true);
-      playerRef.current.playVideo();
-    }
-  };
-
-  const handlePause = () => {
-    if (socketRef.current && playerRef.current) {
-      socketRef.current.emit('pause-video');
-      setIsPlaying(false);
-      playerRef.current.pauseVideo();
-    }
-  };
-
-  const handleNext = () => {
+  const handleRemoveVideo = (videoId) => {
     if (socketRef.current) {
-      socketRef.current.emit('next-video');
+      socketRef.current.emit('remove-from-playlist', { videoId });
     }
-  };
-
-  const handleManualSync = () => {
-    if (!socketRef.current || !currentVideo || !playerInitializedRef.current) {
-      alert('Player not ready. Please wait for the video to load.');
-      return;
-    }
-
-    console.log('Requesting sync...');
-    setIsSyncing(true);
-    setSyncStatus('Syncing...');
-    socketRef.current.emit('request-sync');
-    
-    // Fallback timeout
-    setTimeout(() => {
-      if (isSyncing) {
-        console.log('Sync timeout');
-        setIsSyncing(false);
-        setSyncStatus('Sync timeout - try again');
-        setTimeout(() => setSyncStatus('Connected'), 2000);
-      }
-    }, 5000);
   };
 
   const toggleVideoVisibility = () => {
-    if (!playerRef.current || !currentVideo) return;
-    
-    isTogglingVideoRef.current = true;
-    const newShowVideo = !showVideo;
-    
-    try {
-      // Get current state before toggling
-      const currentTime = playerRef.current.getCurrentTime();
-      const wasPlaying = isPlaying;
-      
-      console.log('Toggling video visibility. Current time:', currentTime, 'Playing:', wasPlaying);
-      
-      // Update visibility state
-      setShowVideo(newShowVideo);
-      
-      // Wait for DOM to update, then recreate player
-      setTimeout(() => {
+    setShowVideo(!showVideo);
+    setTimeout(() => {
+      if (currentVideo) {
         playerInitializedRef.current = false;
-        
-        if (playerRef.current) {
-          try {
-            playerRef.current.destroy();
-          } catch (e) {
-            console.error('Error destroying player:', e);
-          }
-        }
-        
-        // Recreate player with new visibility
-        const playerDiv = document.getElementById('youtube-player');
-        if (!playerDiv) {
-          isTogglingVideoRef.current = false;
-          return;
-        }
-        
-        playerRef.current = new window.YT.Player('youtube-player', {
-          height: newShowVideo ? '400' : '0',
-          width: newShowVideo ? '100%' : '0',
-          videoId: currentVideo.videoId,
-          playerVars: {
-            playsinline: 1,
-            enablejsapi: 1,
-            origin: window.location.origin,
-            autoplay: 0,
-            controls: newShowVideo ? 1 : 0,
-            rel: 0,
-            modestbranding: 1
-          },
-          events: {
-            onReady: (event) => {
-              console.log('Player recreated, restoring state');
-              playerInitializedRef.current = true;
-              
-              // Restore playback position and state
-              event.target.seekTo(currentTime, true);
-              
-              if (wasPlaying) {
-                setTimeout(() => {
-                  event.target.playVideo();
-                }, 200);
-              }
-              
-              setTimeout(() => {
-                isTogglingVideoRef.current = false;
-              }, 300);
-            },
-            onStateChange: onPlayerStateChange,
-            onError: (error) => {
-              console.error('Player error:', error);
-              isTogglingVideoRef.current = false;
-            }
-          }
-        });
-      }, 100);
-    } catch (error) {
-      console.error('Error toggling video:', error);
-      isTogglingVideoRef.current = false;
-    }
+        createPlayer();
+      }
+    }, 100);
   };
 
   const sendMessage = (e) => {
@@ -520,281 +359,249 @@ function Room() {
 
   return (
     <div className="container">
-      {/* Header */}
-      <div className="room-header">
-        <div>
-          <h1 className="room-title">SoulSync Room</h1>
-          <p style={{ color: '#a1a1aa', margin: '8px 0 0 0', fontSize: '14px' }}>
-            Welcome, <strong>{userName}</strong>
-            <span className="sync-status"> • {syncStatus}</span>
-            {currentController && (
-              <span style={{ color: '#8b5cf6', marginLeft: '8px' }}>
-                🎮 {currentController}
-              </span>
-            )}
-            {!showVideo && currentVideo && (
-              <span style={{ color: '#f59e0b', marginLeft: '8px' }}>
-                🔊 Audio Mode
-              </span>
-            )}
-          </p>
+      {/* Modern Header */}
+      <div className="room-header-modern">
+        <div className="room-header-left">
+          <div className="room-icon">🎵</div>
+          <div>
+            <h1 className="room-title-modern">SoulSync Room</h1>
+            <div className="room-meta">
+              <span className="user-badge">👤 {userName}</span>
+              <span className="status-badge">{connectionStatus}</span>
+              {currentController && (
+                <span className="controller-badge">🎮 {currentController}</span>
+              )}
+            </div>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button className="btn btn-compact" onClick={() => setShowSearch(true)}>
-            🔍 Search
+        <div className="room-header-right">
+          <div className="user-count-badge">
+            👥 {users.length} {users.length === 1 ? 'user' : 'users'}
+          </div>
+          <button className="btn btn-icon" onClick={() => setShowSearch(true)} title="Search">
+            🔍
           </button>
-          <button className="btn btn-compact btn-secondary" onClick={copyInviteLink}>
-            📋 Invite
+          <button className="btn btn-icon" onClick={copyInviteLink} title="Copy invite">
+            📋
           </button>
-          <button className="btn btn-compact btn-secondary" onClick={() => navigate('/')}>
-            ← Leave
+          <button className="btn btn-icon btn-danger" onClick={() => navigate('/')} title="Leave">
+            🚪
           </button>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: showChat ? '2fr 1fr' : '1fr', gap: '20px' }}>
-        {/* Main Content */}
-        <div>
-          {/* Player Controls */}
-          <div className="player-controls-compact">
-            <button 
-              className="btn btn-compact"
-              onClick={toggleVideoVisibility}
-              disabled={!currentVideo}
-              title={showVideo ? 'Hide video (audio only)' : 'Show video'}
-            >
-              {showVideo ? '👁️ Hide Video' : '🔊 Show Video'}
-            </button>
-
-            <button 
-              className="btn btn-compact"
-              onClick={handleManualSync}
-              disabled={isSyncing || !currentVideo || !playerInitializedRef.current}
-              title="Sync with controller"
-            >
-              {isSyncing ? '⏳ Syncing...' : '🔄 Sync'}
-            </button>
-
-            <button 
-              className="btn btn-compact btn-secondary"
-              onClick={() => setShowChat(!showChat)}
-            >
-              {showChat ? '💬 Hide Chat' : '💬 Show Chat'}
-            </button>
-          </div>
-
-          {/* Now Playing (Audio Mode) */}
-          {!showVideo && currentVideo && (
-            <div className="now-playing-info">
-              <div style={{ fontSize: '32px' }}>🎵</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: '18px', fontWeight: '700', color: '#f8fafc', marginBottom: '4px' }}>
-                  {currentVideo.title}
+      {/* Main Layout */}
+      <div className="room-layout">
+        {/* Left Column - Video & Playlist */}
+        <div className="room-main-content">
+          {/* Video Player Section */}
+          <div className="video-section">
+            {!showVideo && currentVideo && (
+              <div className="audio-mode-banner">
+                <div className="audio-mode-icon">🎧</div>
+                <div className="audio-mode-info">
+                  <div className="audio-mode-title">{currentVideo.title}</div>
+                  <div className="audio-mode-channel">{currentVideo.channelTitle}</div>
                 </div>
-                <div style={{ fontSize: '14px', color: '#a1a1aa' }}>
-                  {currentVideo.channelTitle}
+                <div className="audio-mode-status">
+                  {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
                 </div>
               </div>
-              <div style={{ 
-                color: isPlaying ? '#10b981' : '#ef4444',
-                fontSize: '14px',
-                fontWeight: '600'
-              }}>
-                {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
+            )}
+
+            <div className="player-wrapper" style={{ display: showVideo ? 'block' : 'none' }}>
+              <div id="youtube-player">
+                {!currentVideo && (
+                  <div className="player-empty-state">
+                    <div className="empty-icon">🎵</div>
+                    <div className="empty-title">No video playing</div>
+                    <div className="empty-subtitle">Add a video to start listening together!</div>
+                  </div>
+                )}
               </div>
             </div>
-          )}
 
-          {/* Player */}
-          <div className="player-container" style={{ 
-            display: showVideo ? 'block' : 'none',
-            minHeight: showVideo ? '400px' : '0'
-          }}>
-            <div id="youtube-player">
-              {!currentVideo && (
-                <div style={{ 
-                  height: '400px', 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  justifyContent: 'center', 
-                  flexDirection: 'column',
-                  gap: '16px',
-                  background: 'rgba(255, 255, 255, 0.02)',
-                  color: '#a1a1aa'
-                }}>
-                  <div style={{ fontSize: '48px' }}>🎵</div>
-                  <div>Add a video to start listening together!</div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Playback Controls */}
-          <div className="controls">
-            <button 
-              className={`btn ${isPlaying ? 'btn-secondary' : 'btn-play'}`}
-              onClick={handlePlay} 
-              disabled={!currentVideo || isPlaying}
-            >
-              ▶️ Play
-            </button>
-            <button 
-              className={`btn ${!isPlaying ? 'btn-secondary' : 'btn-pause'}`}
-              onClick={handlePause} 
-              disabled={!currentVideo || !isPlaying}
-            >
-              ⏸️ Pause
-            </button>
-            <button 
-              className="btn btn-secondary" 
-              onClick={handleNext} 
-              disabled={playlist.length <= 1}
-            >
-              ⏭️ Next
-            </button>
-          </div>
-
-          {/* Add Video */}
-          <div className="add-video-section">
-            <h3 style={{ marginBottom: '16px', color: '#f8fafc', fontSize: '18px' }}>Add Videos</h3>
-            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+            {/* Quick Controls */}
+            <div className="quick-controls">
               <button 
-                className="btn"
+                className="control-btn control-btn-toggle"
+                onClick={toggleVideoVisibility}
+                disabled={!currentVideo}
+              >
+                {showVideo ? '🎧 Audio Mode' : '📺 Video Mode'}
+              </button>
+              
+              <div className="playback-controls">
+                <button 
+                  className="control-btn control-btn-prev"
+                  onClick={() => socketRef.current?.emit('next-video')}
+                  disabled={playlist.length <= 1}
+                  title="Skip"
+                >
+                  ⏭️
+                </button>
+              </div>
+
+              <button 
+                className="control-btn control-btn-chat"
+                onClick={() => setShowChat(!showChat)}
+              >
+                💬 {showChat ? 'Hide' : 'Show'} Chat
+              </button>
+            </div>
+          </div>
+
+          {/* Add Video Section */}
+          <div className="add-video-card">
+            <div className="card-header">
+              <h3>➕ Add Videos</h3>
+            </div>
+            <div className="add-video-content">
+              <button 
+                className="btn btn-primary btn-large"
                 onClick={() => setShowSearch(true)}
-                style={{ flex: '0 0 auto' }}
               >
                 🔍 Search YouTube
               </button>
-              <input
-                type="text"
-                placeholder="Or paste YouTube URL..."
-                value={videoUrl}
-                onChange={(e) => setVideoUrl(e.target.value)}
-                onKeyPress={(e) => {
-                  if (e.key === 'Enter') addToPlaylist(e);
-                }}
-                style={{
-                  flex: '1',
-                  minWidth: '250px',
-                  padding: '12px 16px',
-                  border: '1px solid rgba(255, 255, 255, 0.2)',
-                  borderRadius: '10px',
-                  background: 'rgba(255, 255, 255, 0.05)',
-                  color: 'white',
-                  fontSize: '14px'
-                }}
-              />
-              <button 
-                onClick={addToPlaylist} 
-                className="btn"
-                disabled={!videoUrl.trim()}
-              >
-                Add
-              </button>
+              <div className="divider">
+                <span>or</span>
+              </div>
+              <form onSubmit={addToPlaylist} className="url-input-form">
+                <input
+                  type="text"
+                  placeholder="Paste YouTube URL here..."
+                  value={videoUrl}
+                  onChange={(e) => setVideoUrl(e.target.value)}
+                  className="url-input"
+                />
+                <button 
+                  type="submit"
+                  className="btn btn-secondary"
+                  disabled={!videoUrl.trim()}
+                >
+                  Add
+                </button>
+              </form>
             </div>
           </div>
 
           {/* Playlist */}
-          <div className="playlist">
-            <h3 style={{ color: '#f8fafc', marginBottom: '16px' }}>
-              Playlist ({playlist.length})
-            </h3>
-            {playlist.length === 0 ? (
-              <div style={{ textAlign: 'center', color: '#a1a1aa', padding: '40px 20px' }}>
-                <div style={{ fontSize: '48px', marginBottom: '12px' }}>🎶</div>
-                <p>No videos yet. Add some above!</p>
-              </div>
-            ) : (
-              playlist.map((video, index) => (
-                <div 
-                  key={video.id} 
-                  className={`playlist-item ${currentVideo?.id === video.id ? 'current-video' : ''}`}
-                >
-                  {video.thumbnail && (
-                    <img
-                      src={video.thumbnail}
-                      alt={video.title}
-                      style={{
-                        width: '80px',
-                        height: '60px',
-                        borderRadius: '8px',
-                        objectFit: 'cover'
-                      }}
-                    />
-                  )}
-                  <div style={{ flex: 1 }}>
-                    <div style={{ 
-                      display: 'flex', 
-                      justifyContent: 'space-between', 
-                      alignItems: 'flex-start',
-                      marginBottom: '6px',
-                      gap: '10px'
-                    }}>
-                      <strong style={{ color: '#f8fafc', fontSize: '15px' }}>
-                        {index + 1}. {video.title}
-                      </strong>
-                      {currentVideo?.id === video.id && (
-                        <span className="now-playing-badge">
-                          {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#a1a1aa', marginBottom: '4px' }}>
-                      {video.channelTitle}
-                    </div>
-                    <small style={{ color: '#71717a' }}>
-                      Added by {video.addedBy}
-                    </small>
-                  </div>
+          <div className="playlist-card">
+            <div className="card-header">
+              <h3>🎵 Playlist ({playlist.length})</h3>
+            </div>
+            <div className="playlist-content">
+              {playlist.length === 0 ? (
+                <div className="playlist-empty">
+                  <div className="empty-icon">🎶</div>
+                  <p>Playlist is empty</p>
+                  <small>Add videos above to get started</small>
                 </div>
-              ))
-            )}
+              ) : (
+                <div className="playlist-items">
+                  {playlist.map((video, index) => (
+                    <div 
+                      key={video.id} 
+                      className={`playlist-item-modern ${currentVideo?.id === video.id ? 'is-playing' : ''}`}
+                    >
+                      <div className="playlist-item-number">
+                        {currentVideo?.id === video.id ? (
+                          <span className="playing-indicator">
+                            {isPlaying ? '▶️' : '⏸️'}
+                          </span>
+                        ) : (
+                          <span>{index + 1}</span>
+                        )}
+                      </div>
+                      
+                      <img
+                        src={video.thumbnail}
+                        alt={video.title}
+                        className="playlist-item-thumbnail"
+                      />
+                      
+                      <div className="playlist-item-info">
+                        <div className="playlist-item-title">{video.title}</div>
+                        <div className="playlist-item-meta">
+                          <span>{video.channelTitle}</span>
+                          <span className="separator">•</span>
+                          <span>Added by {video.addedBy}</span>
+                        </div>
+                      </div>
+
+                      <button 
+                        className="playlist-item-remove"
+                        onClick={() => handleRemoveVideo(video.id)}
+                        title="Remove from playlist"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Chat */}
+        {/* Right Column - Chat */}
         {showChat && (
-          <div className="chat-container">
-            <h3 style={{ color: '#f8fafc', marginBottom: '16px' }}>💬 Chat</h3>
-            <div ref={chatContainerRef} className="chat-messages">
+          <div className="chat-panel">
+            <div className="chat-header">
+              <h3>💬 Chat</h3>
+              <button 
+                className="btn-icon-small"
+                onClick={() => setShowChat(false)}
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div ref={chatContainerRef} className="chat-messages-modern">
               {messages.length === 0 ? (
-                <div style={{ textAlign: 'center', color: '#a1a1aa', padding: '40px 20px' }}>
-                  <div style={{ fontSize: '32px', marginBottom: '8px' }}>💬</div>
-                  <p>Start chatting!</p>
+                <div className="chat-empty">
+                  <div className="empty-icon">💬</div>
+                  <p>No messages yet</p>
+                  <small>Start chatting with your friends!</small>
                 </div>
               ) : (
                 messages.map((message) => (
                   <div 
                     key={message.id}
-                    className={`chat-message ${message.type === 'system' ? 'system' : ''}`}
+                    className={`chat-bubble ${message.type === 'system' ? 'chat-bubble-system' : 'chat-bubble-user'}`}
                   >
-                    <div className="chat-message-header">
-                      <span className={`chat-username ${message.type === 'system' ? 'system' : ''}`}>
+                    <div className="chat-bubble-header">
+                      <span className="chat-bubble-username">
                         {message.userName}
                       </span>
-                      <span className="chat-timestamp">
-                        {new Date(message.timestamp).toLocaleTimeString()}
+                      <span className="chat-bubble-time">
+                        {new Date(message.timestamp).toLocaleTimeString([], { 
+                          hour: '2-digit', 
+                          minute: '2-digit' 
+                        })}
                       </span>
                     </div>
-                    <div className="chat-text">{message.message}</div>
+                    <div className="chat-bubble-text">{message.message}</div>
                   </div>
                 ))
               )}
             </div>
-            <form onSubmit={sendMessage} className="chat-input-form">
+            
+            <form onSubmit={sendMessage} className="chat-input-modern">
               <input
                 type="text"
                 placeholder="Type a message..."
                 value={newMessage}
                 onChange={(e) => setNewMessage(e.target.value)}
-                className="chat-input"
+                className="chat-input-field"
+                maxLength={500}
               />
               <button 
                 type="submit" 
-                className="btn btn-compact"
+                className="chat-send-btn"
                 disabled={!newMessage.trim()}
               >
-                Send
+                ➤
               </button>
             </form>
           </div>
