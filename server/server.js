@@ -9,7 +9,6 @@ import { youtubeSearchLimiter, apiLimiter } from './middleware/security.js';
 const app = express();
 const server = http.createServer(app);
 
-// CORS configuration for production
 const corsOptions = {
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
@@ -36,27 +35,22 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static('../client/dist'));
-
-// Apply rate limiting
 app.use('/api/', apiLimiter);
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const PORT = process.env.PORT || 3001;
 
-// In-memory storage
 const rooms = new Map();
-const users = new Map();
 const searchCache = new Map();
 const CACHE_DURATION = 5 * 60 * 1000;
 
-// Room management
 function createRoom(roomName, createdBy) {
   const roomId = uuidv4().substring(0, 8);
   const room = {
     id: roomId,
     name: roomName,
     createdBy,
-    users: new Map(), // Use Map to track socketId -> userName
+    users: new Map(),
     playlist: [],
     currentVideo: null,
     isPlaying: false,
@@ -64,7 +58,7 @@ function createRoom(roomName, createdBy) {
     lastUpdate: Date.now(),
     createdAt: new Date(),
     messages: [],
-    currentController: null, // Track who is currently controlling playback
+    currentController: null,
   };
   rooms.set(roomId, room);
   return room;
@@ -76,6 +70,15 @@ function getRoom(roomId) {
 
 function deleteRoom(roomId) {
   rooms.delete(roomId);
+}
+
+// Calculate current video time based on playback state
+function getCurrentVideoTime(room) {
+  if (!room.isPlaying) {
+    return room.currentTime;
+  }
+  const elapsedSeconds = (Date.now() - room.lastUpdate) / 1000;
+  return room.currentTime + elapsedSeconds;
 }
 
 // REST API Routes
@@ -102,7 +105,7 @@ app.post('/api/rooms', (req, res) => {
   res.json({ roomId: room.id, roomName: room.name });
 });
 
-// YouTube Search Route
+// YouTube Search
 app.get('/api/youtube/search', youtubeSearchLimiter, async (req, res) => {
   const { q, maxResults = 8 } = req.query;
   
@@ -119,7 +122,7 @@ app.get('/api/youtube/search', youtubeSearchLimiter, async (req, res) => {
 
   if (!YOUTUBE_API_KEY) {
     return res.status(503).json({ 
-      error: 'YouTube search is temporarily unavailable. Please try adding videos by URL instead.' 
+      error: 'YouTube search unavailable. Try adding videos by URL.' 
     });
   }
 
@@ -139,7 +142,7 @@ app.get('/api/youtube/search', youtubeSearchLimiter, async (req, res) => {
     
     if (!response.ok) {
       if (response.status === 403) {
-        throw new Error('YouTube API quota exceeded. Please try again later.');
+        throw new Error('YouTube API quota exceeded.');
       }
       throw new Error(data.error?.message || 'YouTube API error');
     }
@@ -162,16 +165,12 @@ app.get('/api/youtube/search', youtubeSearchLimiter, async (req, res) => {
     res.json(videos);
   } catch (error) {
     console.error('YouTube search error:', error);
-    
-    if (error.message.includes('quota')) {
-      res.status(429).json({ error: 'YouTube API quota exceeded. Please try again later.' });
-    } else {
-      res.status(500).json({ error: 'Search failed: ' + error.message });
-    }
+    res.status(error.message.includes('quota') ? 429 : 500)
+       .json({ error: error.message });
   }
 });
 
-// Video details endpoint
+// Video details
 app.get('/api/youtube/video/:videoId', youtubeSearchLimiter, async (req, res) => {
   const { videoId } = req.params;
 
@@ -203,22 +202,19 @@ app.get('/api/youtube/video/:videoId', youtubeSearchLimiter, async (req, res) =>
     }
     
     const video = data.items[0];
-    const videoInfo = {
+    res.json({
       videoId: video.id,
       title: video.snippet.title,
       thumbnail: video.snippet.thumbnails.medium?.url || video.snippet.thumbnails.default?.url,
       channelTitle: video.snippet.channelTitle,
       description: video.snippet.description
-    };
-    
-    res.json(videoInfo);
+    });
   } catch (error) {
     console.error('YouTube video fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch video info' });
   }
 });
 
-// Health check
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -227,30 +223,26 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Serve client app for all other routes
 app.get('*', (req, res) => {
   res.sendFile('index.html', { root: '../client/dist' });
 });
 
-// Socket.io with proper configuration
+// Socket.io
 const io = new Server(server, {
   cors: {
     origin: corsOptions.origin,
     methods: ["GET", "POST"],
     credentials: true
   },
-  // Add server-side configuration to prevent spam
   connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    maxDisconnectionDuration: 2 * 60 * 1000,
     skipMiddlewares: true,
   },
   allowEIO3: true
 });
 
-// Track user rooms to prevent duplicate joins
 const userRooms = new Map();
 
-// Socket.io connection handling
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -263,30 +255,24 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Check if user is already in this room
     const currentUserRoom = userRooms.get(socket.id);
     if (currentUserRoom === roomId) {
-      console.log(`User ${userName} already in room ${roomId}, skipping duplicate join`);
-      // Still send room state but don't create duplicate system message
       socket.emit('room-state', {
         playlist: room.playlist,
         currentVideo: room.currentVideo,
         isPlaying: room.isPlaying,
-        currentTime: room.currentTime,
+        currentTime: getCurrentVideoTime(room),
         messages: room.messages || [],
         currentController: room.currentController
       });
       return;
     }
 
-    // Remove from previous room if any
     if (currentUserRoom) {
       const previousRoom = getRoom(currentUserRoom);
       if (previousRoom) {
         previousRoom.users.delete(socket.id);
         socket.leave(currentUserRoom);
-        
-        // Notify previous room
         socket.to(currentUserRoom).emit('user-left', { 
           userName: userName, 
           userCount: previousRoom.users.size 
@@ -294,28 +280,24 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Join new room
     room.users.set(socket.id, userName);
     userRooms.set(socket.id, roomId);
     socket.join(roomId);
 
-    // Send room state including chat history
     socket.emit('room-state', {
       playlist: room.playlist,
       currentVideo: room.currentVideo,
       isPlaying: room.isPlaying,
-      currentTime: room.currentTime,
+      currentTime: getCurrentVideoTime(room),
       messages: room.messages || [],
       currentController: room.currentController
     });
 
-    // Notify others (except the joining user)
     socket.to(roomId).emit('user-joined', { 
       userName: userName, 
       userCount: room.users.size 
     });
     
-    // Send system message
     const systemMessage = {
       id: uuidv4(),
       userName: 'System',
@@ -329,10 +311,8 @@ io.on('connection', (socket) => {
       room.messages = room.messages.slice(-100);
     }
     
-    // Broadcast to all including the joining user
     io.to(roomId).emit('new-message', systemMessage);
-    
-    console.log(`User ${userName} joined room ${roomId} (Users: ${room.users.size})`);
+    console.log(`${userName} joined room ${roomId}`);
   });
 
   socket.on('add-to-playlist', (data) => {
@@ -383,6 +363,8 @@ io.on('connection', (socket) => {
 
     const userName = room.users.get(socket.id);
     
+    // Update current time before changing state
+    room.currentTime = getCurrentVideoTime(room);
     room.isPlaying = true;
     room.lastUpdate = Date.now();
     room.currentController = userName;
@@ -400,6 +382,8 @@ io.on('connection', (socket) => {
 
     const userName = room.users.get(socket.id);
     
+    // Save current time when pausing
+    room.currentTime = getCurrentVideoTime(room);
     room.isPlaying = false;
     room.lastUpdate = Date.now();
     room.currentController = userName;
@@ -456,31 +440,27 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('controller-updated', { controller: userName });
   });
 
-  // Manual sync request - IMPROVED with better time calculation
+  // Improved sync - sends accurate current playback time
   socket.on('request-sync', () => {
     const roomId = userRooms.get(socket.id);
     if (!roomId) return;
 
     const room = getRoom(roomId);
-    if (!room) return;
+    if (!room || !room.currentVideo) return;
 
-    let calculatedTime = room.currentTime;
-    if (room.isPlaying) {
-      calculatedTime += (Date.now() - room.lastUpdate) / 1000;
-    }
+    const currentTime = getCurrentVideoTime(room);
 
-    // Ensure time is not negative and send precise data
     socket.emit('sync-response', {
-      time: Math.max(0, calculatedTime),
+      time: Math.max(0, currentTime),
       isPlaying: room.isPlaying,
-      videoId: room.currentVideo?.videoId,
-      controller: room.currentController
+      videoId: room.currentVideo.videoId,
+      controller: room.currentController || 'Unknown'
     });
     
-    console.log(`Sync requested by ${room.users.get(socket.id)} - Sending time: ${Math.max(0, calculatedTime)}`);
+    console.log(`Sync: User synced to ${currentTime.toFixed(2)}s (${room.isPlaying ? 'playing' : 'paused'})`);
   });
 
-  // Chat functionality
+  // Chat
   socket.on('send-message', (data) => {
     const roomId = userRooms.get(socket.id);
     if (!roomId) return;
@@ -498,13 +478,11 @@ io.on('connection', (socket) => {
       type: 'user'
     };
 
-    // Store message in room (limit to 100 messages)
     room.messages.push(message);
     if (room.messages.length > 100) {
       room.messages = room.messages.slice(-100);
     }
 
-    // Broadcast to all room members
     io.to(roomId).emit('new-message', message);
   });
 
@@ -518,7 +496,6 @@ io.on('connection', (socket) => {
         const userName = room.users.get(socket.id);
         room.users.delete(socket.id);
         
-        // Send system message only if user was actually in the room
         if (userName) {
           const systemMessage = {
             id: uuidv4(),
@@ -540,7 +517,6 @@ io.on('connection', (socket) => {
           });
         }
 
-        // Delete room if empty for more than 1 minute
         if (room.users.size === 0) {
           setTimeout(() => {
             const currentRoom = getRoom(roomId);
