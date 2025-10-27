@@ -183,9 +183,10 @@ function Room() {
           }
           
           playerRef.current.playVideo();
-          setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 500);
         } catch (err) {
           console.error('Error playing video:', err);
+          ignoreNextStateChange.current = false;
         }
       }
     });
@@ -214,7 +215,7 @@ function Room() {
           
           setTimeout(() => { 
             ignoreNextStateChange.current = false; 
-          }, 300);
+          }, 500);
         } catch (err) {
           console.error('Error pausing video:', err);
           ignoreNextStateChange.current = false;
@@ -231,9 +232,10 @@ function Room() {
         try {
           ignoreNextStateChange.current = true;
           playerRef.current.seekTo(time, true);
-          setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 500);
         } catch (err) {
           console.error('Error seeking video:', err);
+          ignoreNextStateChange.current = false;
         }
       }
     });
@@ -465,9 +467,12 @@ function Room() {
           const currentTime = playerRef.current.getCurrentTime();
           currentTimeRef.current = currentTime;
           console.log('User initiated play - Emitting play at:', currentTime);
+          ignoreNextStateChange.current = true;
           socketRef.current.emit('play-video', { time: currentTime });
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 500);
         } catch (err) {
           console.error('Error in play handler:', err);
+          ignoreNextStateChange.current = false;
         }
       }
     } else if (state === window.YT.PlayerState.PAUSED) {
@@ -476,9 +481,12 @@ function Room() {
           const currentTime = playerRef.current.getCurrentTime();
           currentTimeRef.current = currentTime;
           console.log('User initiated pause - Emitting pause at:', currentTime);
+          ignoreNextStateChange.current = true;
           socketRef.current.emit('pause-video', { time: currentTime });
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 500);
         } catch (err) {
           console.error('Error in pause handler:', err);
+          ignoreNextStateChange.current = false;
         }
       }
     } else if (state === window.YT.PlayerState.ENDED) {
