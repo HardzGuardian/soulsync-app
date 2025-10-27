@@ -36,6 +36,7 @@ function Room() {
   const isCreatingPlayer = useRef(false);
   const apiReadyRef = useRef(false);
   const forceUpdateCounter = useRef(0);
+  const isPlayingRef = useRef(false);
 
   const [, forceUpdate] = useState(0);
   const triggerUpdate = () => forceUpdate(prev => prev + 1);
@@ -92,6 +93,7 @@ function Room() {
       setCurrentVideo(state.currentVideo);
       setHasVideo(!!state.currentVideo);
       setIsPlaying(state.isPlaying || false);
+      isPlayingRef.current = state.isPlaying || false;
       setMessages(state.messages || []);
       setCurrentController(state.currentController || null);
       setUsers(state.users || []);
@@ -120,6 +122,7 @@ function Room() {
       setCurrentVideo(video);
       setHasVideo(!!video);
       setIsPlaying(playing);
+      isPlayingRef.current = playing;
       setCurrentController(controller);
       currentTimeRef.current = currentTime || 0;
       
@@ -166,6 +169,7 @@ function Room() {
     newSocket.on('video-played', ({ controller, currentTime }) => {
       console.log('Play command from:', controller, 'at', currentTime);
       setIsPlaying(true);
+      isPlayingRef.current = true;
       setCurrentController(controller);
       
       if (playerRef.current && playerInitializedRef.current) {
