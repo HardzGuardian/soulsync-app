@@ -64,6 +64,7 @@ function createRoom(roomName, createdBy) {
     lastUpdate: Date.now(),
     createdAt: new Date(),
     messages: [],
+    currentController: null, // Track who is currently controlling playback
   };
   rooms.set(roomId, room);
   return room;
@@ -85,7 +86,8 @@ app.get('/api/rooms', (req, res) => {
     userCount: room.users.size,
     currentVideo: room.currentVideo,
     createdBy: room.createdBy,
-    createdAt: room.createdAt
+    createdAt: room.createdAt,
+    currentController: room.currentController
   }));
   res.json(roomList);
 });
@@ -271,7 +273,8 @@ io.on('connection', (socket) => {
         currentVideo: room.currentVideo,
         isPlaying: room.isPlaying,
         currentTime: room.currentTime,
-        messages: room.messages || []
+        messages: room.messages || [],
+        currentController: room.currentController
       });
       return;
     }
@@ -302,7 +305,8 @@ io.on('connection', (socket) => {
       currentVideo: room.currentVideo,
       isPlaying: room.isPlaying,
       currentTime: room.currentTime,
-      messages: room.messages || []
+      messages: room.messages || [],
+      currentController: room.currentController
     });
 
     // Notify others (except the joining user)
@@ -357,13 +361,15 @@ io.on('connection', (socket) => {
       room.isPlaying = true;
       room.currentTime = 0;
       room.lastUpdate = Date.now();
+      room.currentController = userName;
     }
 
     io.to(roomId).emit('playlist-updated', room.playlist);
     if (room.currentVideo === video) {
       io.to(roomId).emit('video-changed', { 
         video: room.currentVideo, 
-        isPlaying: room.isPlaying 
+        isPlaying: room.isPlaying,
+        controller: room.currentController
       });
     }
   });
@@ -375,10 +381,14 @@ io.on('connection', (socket) => {
     const room = getRoom(roomId);
     if (!room) return;
 
+    const userName = room.users.get(socket.id);
+    
     room.isPlaying = true;
     room.lastUpdate = Date.now();
+    room.currentController = userName;
     
-    socket.to(roomId).emit('video-played');
+    socket.to(roomId).emit('video-played', { controller: userName });
+    io.to(roomId).emit('controller-updated', { controller: userName });
   });
 
   socket.on('pause-video', () => {
@@ -388,10 +398,14 @@ io.on('connection', (socket) => {
     const room = getRoom(roomId);
     if (!room) return;
 
+    const userName = room.users.get(socket.id);
+    
     room.isPlaying = false;
     room.lastUpdate = Date.now();
+    room.currentController = userName;
     
-    socket.to(roomId).emit('video-paused');
+    socket.to(roomId).emit('video-paused', { controller: userName });
+    io.to(roomId).emit('controller-updated', { controller: userName });
   });
 
   socket.on('seek-video', (data) => {
@@ -401,10 +415,17 @@ io.on('connection', (socket) => {
     const room = getRoom(roomId);
     if (!room) return;
 
+    const userName = room.users.get(socket.id);
+    
     room.currentTime = data.time;
     room.lastUpdate = Date.now();
+    room.currentController = userName;
     
-    socket.to(roomId).emit('video-seeked', { time: data.time });
+    socket.to(roomId).emit('video-seeked', { 
+      time: data.time,
+      controller: userName
+    });
+    io.to(roomId).emit('controller-updated', { controller: userName });
   });
 
   socket.on('next-video', () => {
@@ -414,6 +435,8 @@ io.on('connection', (socket) => {
     const room = getRoom(roomId);
     if (!room || room.playlist.length === 0) return;
 
+    const userName = room.users.get(socket.id);
+
     if (room.currentVideo) {
       room.playlist = room.playlist.filter(video => video.id !== room.currentVideo.id);
     }
@@ -422,11 +445,35 @@ io.on('connection', (socket) => {
     room.isPlaying = true;
     room.currentTime = 0;
     room.lastUpdate = Date.now();
+    room.currentController = userName;
 
     io.to(roomId).emit('playlist-updated', room.playlist);
     io.to(roomId).emit('video-changed', { 
       video: room.currentVideo, 
-      isPlaying: room.isPlaying 
+      isPlaying: room.isPlaying,
+      controller: userName
+    });
+    io.to(roomId).emit('controller-updated', { controller: userName });
+  });
+
+  // Manual sync request - sync with current controller
+  socket.on('request-sync', () => {
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
+
+    const room = getRoom(roomId);
+    if (!room) return;
+
+    let calculatedTime = room.currentTime;
+    if (room.isPlaying) {
+      calculatedTime += (Date.now() - room.lastUpdate) / 1000;
+    }
+
+    socket.emit('sync-response', {
+      time: calculatedTime,
+      isPlaying: room.isPlaying,
+      videoId: room.currentVideo?.videoId,
+      controller: room.currentController
     });
   });
 

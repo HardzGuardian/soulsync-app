@@ -22,6 +22,11 @@ function Room() {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [showChat, setShowChat] = useState(true);
+  // New states for video hide and player size
+  const [showVideo, setShowVideo] = useState(true);
+  const [playerSize, setPlayerSize] = useState('full'); // 'full', 'mini'
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [currentController, setCurrentController] = useState(null); // Track who's controlling
   
   const playerRef = useRef(null);
   const chatContainerRef = useRef(null);
@@ -86,38 +91,67 @@ function Room() {
       setCurrentVideo(state.currentVideo);
       setIsPlaying(state.isPlaying || false);
       setMessages(state.messages || []);
+      setCurrentController(state.currentController || null);
     });
 
     newSocket.on('playlist-updated', (updatedPlaylist) => {
       setPlaylist(updatedPlaylist);
     });
     
-    newSocket.on('video-changed', ({ video, isPlaying: playing }) => {
+    newSocket.on('video-changed', ({ video, isPlaying: playing, controller }) => {
       setCurrentVideo(video);
       setIsPlaying(playing);
+      setCurrentController(controller);
       if (playing && playerRef.current) {
         playerRef.current.playVideo();
       }
     });
 
-    newSocket.on('video-played', () => {
+    newSocket.on('video-played', ({ controller }) => {
       setIsPlaying(true);
+      setCurrentController(controller);
       if (playerRef.current) {
         playerRef.current.playVideo();
       }
     });
 
-    newSocket.on('video-paused', () => {
+    newSocket.on('video-paused', ({ controller }) => {
       setIsPlaying(false);
+      setCurrentController(controller);
       if (playerRef.current) {
         playerRef.current.pauseVideo();
       }
     });
 
-    newSocket.on('video-seeked', ({ time }) => {
+    newSocket.on('video-seeked', ({ time, controller }) => {
+      setCurrentController(controller);
       if (playerRef.current) {
         playerRef.current.seekTo(time, true);
       }
+    });
+
+    // Manual sync response
+    newSocket.on('sync-response', ({ time, isPlaying: serverPlaying, videoId, controller }) => {
+      if (playerRef.current && currentVideo?.videoId === videoId) {
+        playerRef.current.seekTo(time, true);
+        if (serverPlaying !== isPlaying) {
+          if (serverPlaying) {
+            playerRef.current.playVideo();
+          } else {
+            playerRef.current.pauseVideo();
+          }
+          setIsPlaying(serverPlaying);
+        }
+        setCurrentController(controller);
+        setSyncStatus(`Synced with ${controller}`);
+        setIsSyncing(false);
+        setTimeout(() => setSyncStatus('Connected'), 3000);
+      }
+    });
+
+    // Controller update
+    newSocket.on('controller-updated', ({ controller }) => {
+      setCurrentController(controller);
     });
 
     // Chat events
@@ -196,14 +230,17 @@ function Room() {
         playerRef.current.destroy();
       }
     };
-  }, [currentVideo]);
+  }, [currentVideo, showVideo, playerSize]);
 
   const initializePlayer = () => {
-    if (!currentVideo) return;
+    if (!currentVideo || !showVideo) return;
+
+    const playerHeight = playerSize === 'mini' ? '200' : '400';
+    const playerWidth = playerSize === 'mini' ? '356' : '100%';
 
     playerRef.current = new window.YT.Player('youtube-player', {
-      height: '400',
-      width: '100%',
+      height: playerHeight,
+      width: playerWidth,
       videoId: currentVideo.videoId,
       playerVars: {
         playsinline: 1,
@@ -309,6 +346,26 @@ function Room() {
     }
   };
 
+  const handleManualSync = () => {
+    if (socket) {
+      setIsSyncing(true);
+      setSyncStatus('Syncing with current controller...');
+      socket.emit('request-sync');
+    }
+  };
+
+  const toggleVideoVisibility = () => {
+    setShowVideo(!showVideo);
+    // If hiding video but music is playing, ensure it continues
+    if (!showVideo && isPlaying && playerRef.current) {
+      playerRef.current.playVideo();
+    }
+  };
+
+  const togglePlayerSize = () => {
+    setPlayerSize(prev => prev === 'full' ? 'mini' : 'full');
+  };
+
   const sendMessage = (e) => {
     e.preventDefault();
     if (!newMessage.trim() || !socket) return;
@@ -343,6 +400,21 @@ function Room() {
           <p style={{ color: '#a1a1aa', margin: 0 }}>
             Welcome, {userName}! 
             <span className="sync-status"> {syncStatus}</span>
+            {currentController && (
+              <span style={{ color: '#8b5cf6', marginLeft: '10px', fontSize: '12px' }}>
+                🎮 Controlled by: {currentController}
+              </span>
+            )}
+            {!showVideo && (
+              <span style={{ color: '#f59e0b', marginLeft: '10px', fontSize: '12px' }}>
+                🔊 Audio Only Mode
+              </span>
+            )}
+            {playerSize === 'mini' && (
+              <span style={{ color: '#10b981', marginLeft: '10px', fontSize: '12px' }}>
+                📱 Mini Player
+              </span>
+            )}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
@@ -364,29 +436,86 @@ function Room() {
       <div style={{ display: 'grid', gridTemplateColumns: showChat ? '2fr 1fr' : '1fr', gap: '20px', alignItems: 'start' }}>
         {/* Left Column - Player and Playlist */}
         <div>
-          {/* Player Container */}
-          <div className="player-container">
-            <div id="youtube-player">
-              {!currentVideo && (
-                <div style={{ 
-                  height: '400px', 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  justifyContent: 'center', 
-                  background: 'rgba(255, 255, 255, 0.02)',
-                  color: '#a1a1aa',
-                  fontSize: '18px',
-                  flexDirection: 'column',
-                  gap: '16px'
-                }}>
-                  <div style={{ fontSize: '48px' }}>🎵</div>
-                  <div>No video playing. Add a video to get started!</div>
-                </div>
+          {/* Player Controls */}
+          <div className="player-controls-compact">
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <button 
+                className={`btn btn-compact ${showVideo ? '' : 'btn-secondary'}`}
+                onClick={toggleVideoVisibility}
+                title={showVideo ? 'Hide video (keep audio)' : 'Show video'}
+              >
+                {showVideo ? '👁️ Show' : '🙈 Hide'} Video
+              </button>
+
+              {showVideo && (
+                <button 
+                  className={`btn btn-compact ${playerSize === 'mini' ? '' : 'btn-secondary'}`}
+                  onClick={togglePlayerSize}
+                  title={playerSize === 'mini' ? 'Full player' : 'Mini player'}
+                >
+                  {playerSize === 'mini' ? '📱 Mini' : '🖥️ Full'} Player
+                </button>
               )}
+
+              <button 
+                className="btn btn-compact"
+                onClick={handleManualSync}
+                disabled={isSyncing || !currentVideo}
+                title="Sync with current controller"
+              >
+                {isSyncing ? '⏳' : '🔄'} Sync
+              </button>
             </div>
+            
+            {/* Now Playing Info (visible when video is hidden) */}
+            {!showVideo && currentVideo && (
+              <div className="now-playing-info">
+                <div style={{ fontSize: '24px' }}>🎵</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '16px', fontWeight: '600', color: '#f8fafc' }}>
+                    Now Playing: {currentVideo.title}
+                  </div>
+                  <div style={{ fontSize: '14px', color: '#a1a1aa' }}>
+                    {currentVideo.channelTitle}
+                    {currentController && ` • Controlled by: ${currentController}`}
+                  </div>
+                </div>
+                <div style={{ 
+                  color: isPlaying ? '#10b981' : '#ef4444',
+                  fontSize: '14px',
+                  fontWeight: '600'
+                }}>
+                  {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Controls with proper play/pause state */}
+          {/* Player Container */}
+          {showVideo && (
+            <div className={`player-container ${playerSize === 'mini' ? 'mini' : ''}`}>
+              <div id="youtube-player">
+                {!currentVideo && (
+                  <div style={{ 
+                    height: playerSize === 'mini' ? '200px' : '400px', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center', 
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    color: '#a1a1aa',
+                    fontSize: playerSize === 'mini' ? '14px' : '18px',
+                    flexDirection: 'column',
+                    gap: '16px'
+                  }}>
+                    <div style={{ fontSize: playerSize === 'mini' ? '32px' : '48px' }}>🎵</div>
+                    <div>No video playing. Add a video to get started!</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Main Controls */}
           <div className="controls">
             <button 
               className={`btn ${isPlaying ? 'btn-secondary' : 'btn-play'}`} 
@@ -515,6 +644,7 @@ function Room() {
                           fontWeight: '600'
                         }}>
                           {isPlaying ? '▶️ Now Playing' : '⏸️ Paused'}
+                          {currentController && ` • 🎮 ${currentController}`}
                         </span>
                       )}
                     </div>
@@ -591,6 +721,68 @@ function Room() {
           </div>
         )}
       </div>
+
+      {/* Background Audio Status Bar */}
+      {!showVideo && currentVideo && (
+        <div className="background-status">
+          <div style={{ fontSize: '24px' }}>🎵</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '14px', color: 'white', fontWeight: '600' }}>
+              {currentVideo.title}
+            </div>
+            <div style={{ fontSize: '12px', color: '#a1a1aa' }}>
+              {currentVideo.channelTitle} • {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
+              {currentController && ` • 🎮 ${currentController}`}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button 
+              onClick={handlePlay}
+              disabled={isPlaying}
+              style={{
+                background: '#10b981',
+                border: 'none',
+                color: 'white',
+                padding: '6px 12px',
+                borderRadius: '15px',
+                cursor: 'pointer',
+                fontSize: '12px'
+              }}
+            >
+              ▶️
+            </button>
+            <button 
+              onClick={handlePause}
+              disabled={!isPlaying}
+              style={{
+                background: '#ef4444',
+                border: 'none',
+                color: 'white',
+                padding: '6px 12px',
+                borderRadius: '15px',
+                cursor: 'pointer',
+                fontSize: '12px'
+              }}
+            >
+              ⏸️
+            </button>
+            <button 
+              onClick={toggleVideoVisibility}
+              style={{
+                background: '#6366f1',
+                border: 'none',
+                color: 'white',
+                padding: '6px 12px',
+                borderRadius: '15px',
+                cursor: 'pointer',
+                fontSize: '12px'
+              }}
+            >
+              Show Video
+            </button>
+          </div>
+        </div>
+      )}
 
       <YouTubeSearch
         onAddToPlaylist={handleAddFromSearch}
