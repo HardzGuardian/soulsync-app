@@ -9,6 +9,9 @@ import { youtubeSearchLimiter, apiLimiter } from './middleware/security.js';
 const app = express();
 const server = http.createServer(app);
 
+// Trust proxy - Required for Railway and other reverse proxies
+app.set('trust proxy', 1);
+
 const corsOptions = {
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
