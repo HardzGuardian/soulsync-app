@@ -361,7 +361,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('play-video', () => {
+  socket.on('play-video', (data) => {
     const roomId = userRooms.get(socket.id);
     if (!roomId) return;
 
@@ -370,7 +370,10 @@ io.on('connection', (socket) => {
 
     const userName = room.users.get(socket.id);
     
-    room.currentTime = getCurrentVideoTime(room);
+    // Use provided time or calculate current time
+    const time = data?.time !== undefined ? data.time : getCurrentVideoTime(room);
+    
+    room.currentTime = time;
     room.isPlaying = true;
     room.lastUpdate = Date.now();
     room.currentController = userName;
@@ -382,7 +385,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('pause-video', () => {
+  socket.on('pause-video', (data) => {
     const roomId = userRooms.get(socket.id);
     if (!roomId) return;
 
@@ -391,7 +394,10 @@ io.on('connection', (socket) => {
 
     const userName = room.users.get(socket.id);
     
-    room.currentTime = getCurrentVideoTime(room);
+    // Use provided time or calculate current time
+    const time = data?.time !== undefined ? data.time : getCurrentVideoTime(room);
+    
+    room.currentTime = time;
     room.isPlaying = false;
     room.lastUpdate = Date.now();
     room.currentController = userName;

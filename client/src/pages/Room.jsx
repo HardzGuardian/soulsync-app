@@ -23,6 +23,7 @@ function Room() {
   const [showVideo, setShowVideo] = useState(true);
   const [currentController, setCurrentController] = useState(null);
   const [users, setUsers] = useState([]);
+  const [hasVideo, setHasVideo] = useState(false); // Track if video exists
   
   const playerRef = useRef(null);
   const chatContainerRef = useRef(null);
@@ -30,6 +31,14 @@ function Room() {
   const playerInitializedRef = useRef(false);
   const socketRef = useRef(null);
   const ignoreNextStateChange = useRef(false);
+  const currentTimeRef = useRef(0);
+  const isCreatingPlayer = useRef(false);
+  const apiReadyRef = useRef(false);
+  const forceUpdateCounter = useRef(0);
+
+  // Force re-render helper
+  const [, forceUpdate] = useState(0);
+  const triggerUpdate = () => forceUpdate(prev => prev + 1);
 
   // Setup socket connection
   useEffect(() => {
@@ -81,34 +90,69 @@ function Room() {
       console.log('Room state received:', state);
       setPlaylist(state.playlist || []);
       setCurrentVideo(state.currentVideo);
+      setHasVideo(!!state.currentVideo); // Update hasVideo flag
       setIsPlaying(state.isPlaying || false);
       setMessages(state.messages || []);
       setCurrentController(state.currentController || null);
       setUsers(state.users || []);
+      
+      if (state.currentTime !== undefined) {
+        currentTimeRef.current = state.currentTime;
+      }
+      
+      // Force player recreation with new state
+      if (state.currentVideo) {
+        playerInitializedRef.current = false;
+        forceUpdateCounter.current++;
+        triggerUpdate();
+      }
     });
 
     newSocket.on('playlist-updated', (updatedPlaylist) => {
+      console.log('Playlist updated:', updatedPlaylist);
       setPlaylist(updatedPlaylist);
     });
     
     newSocket.on('video-changed', ({ video, isPlaying: playing, currentTime, controller }) => {
-      console.log('Video changed:', video?.title);
+      console.log('Video changed event:', video?.title, 'playing:', playing, 'time:', currentTime);
+      
       setCurrentVideo(video);
+      setHasVideo(!!video); // Update hasVideo flag
       setIsPlaying(playing);
       setCurrentController(controller);
+      currentTimeRef.current = currentTime || 0;
       playerInitializedRef.current = false;
       
-      // Recreate player for new video
-      if (video && playerRef.current) {
-        ignoreNextStateChange.current = true;
-        playerRef.current.loadVideoById(video.videoId, currentTime || 0);
-        
-        setTimeout(() => {
-          if (playing && playerRef.current) {
-            playerRef.current.playVideo();
-          }
-          ignoreNextStateChange.current = false;
-        }, 500);
+      // Force update to trigger player recreation
+      forceUpdateCounter.current++;
+      triggerUpdate();
+      
+      // If player exists, load new video immediately
+      if (video && playerRef.current && typeof playerRef.current.loadVideoById === 'function') {
+        try {
+          ignoreNextStateChange.current = true;
+          playerRef.current.loadVideoById(video.videoId, currentTime || 0);
+          
+          setTimeout(() => {
+            if (playing && playerRef.current) {
+              playerRef.current.playVideo();
+            } else if (playerRef.current) {
+              playerRef.current.pauseVideo();
+            }
+            ignoreNextStateChange.current = false;
+          }, 500);
+        } catch (err) {
+          console.error('Error loading video:', err);
+          // Fallback: recreate player
+          playerInitializedRef.current = false;
+          setTimeout(() => createPlayer(), 100);
+        }
+      } else if (video) {
+        // No player exists, create one
+        setTimeout(() => createPlayer(), 100);
+      } else {
+        // No video, set hasVideo to false
+        setHasVideo(false);
       }
     });
 
@@ -118,12 +162,24 @@ function Room() {
       setCurrentController(controller);
       
       if (playerRef.current && playerInitializedRef.current) {
-        ignoreNextStateChange.current = true;
-        if (currentTime !== undefined) {
-          playerRef.current.seekTo(currentTime, true);
+        try {
+          ignoreNextStateChange.current = true;
+          
+          if (currentTime !== undefined) {
+            const playerTime = playerRef.current.getCurrentTime();
+            const timeDiff = Math.abs(playerTime - currentTime);
+            
+            if (timeDiff > 2) {
+              playerRef.current.seekTo(currentTime, true);
+            }
+            currentTimeRef.current = currentTime;
+          }
+          
+          playerRef.current.playVideo();
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+        } catch (err) {
+          console.error('Error playing video:', err);
         }
-        playerRef.current.playVideo();
-        setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
       }
     });
 
@@ -133,23 +189,35 @@ function Room() {
       setCurrentController(controller);
       
       if (playerRef.current && playerInitializedRef.current) {
-        ignoreNextStateChange.current = true;
-        if (currentTime !== undefined) {
-          playerRef.current.seekTo(currentTime, true);
+        try {
+          ignoreNextStateChange.current = true;
+          
+          if (currentTime !== undefined) {
+            playerRef.current.seekTo(currentTime, true);
+            currentTimeRef.current = currentTime;
+          }
+          
+          playerRef.current.pauseVideo();
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+        } catch (err) {
+          console.error('Error pausing video:', err);
         }
-        playerRef.current.pauseVideo();
-        setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
       }
     });
 
     newSocket.on('video-seeked', ({ time, controller }) => {
       console.log('Seek command from:', controller, 'to', time);
       setCurrentController(controller);
+      currentTimeRef.current = time;
       
       if (playerRef.current && playerInitializedRef.current) {
-        ignoreNextStateChange.current = true;
-        playerRef.current.seekTo(time, true);
-        setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+        try {
+          ignoreNextStateChange.current = true;
+          playerRef.current.seekTo(time, true);
+          setTimeout(() => { ignoreNextStateChange.current = false; }, 300);
+        } catch (err) {
+          console.error('Error seeking video:', err);
+        }
       }
     });
 
@@ -188,45 +256,118 @@ function Room() {
     }
   }, [messages]);
 
-  // Initialize YouTube Player
+  // Initialize YouTube API
   useEffect(() => {
-    if (currentVideo && !playerInitializedRef.current) {
-      initializePlayer();
-    }
-  }, [currentVideo, showVideo]);
-
-  const initializePlayer = () => {
-    if (!currentVideo) return;
-
     if (!window.YT) {
       const tag = document.createElement('script');
       tag.src = 'https://www.youtube.com/iframe_api';
+      tag.async = true;
       const firstScriptTag = document.getElementsByTagName('script')[0];
       firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
 
       window.onYouTubeIframeAPIReady = () => {
-        createPlayer();
+        console.log('YouTube API Ready');
+        apiReadyRef.current = true;
+        if (currentVideo && !playerInitializedRef.current) {
+          createPlayer();
+        }
       };
-    } else {
-      createPlayer();
+    } else if (window.YT.Player) {
+      apiReadyRef.current = true;
     }
-  };
+  }, []);
+
+  // Create player when video changes
+  useEffect(() => {
+    if (currentVideo && !playerInitializedRef.current && !isCreatingPlayer.current) {
+      console.log('Creating player for:', currentVideo.title);
+      setHasVideo(true); // Ensure hasVideo is set
+      createPlayer();
+    } else if (!currentVideo) {
+      setHasVideo(false); // No video
+    }
+  }, [currentVideo, forceUpdateCounter.current]);
+
+  // Track current time periodically
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (playerRef.current && playerInitializedRef.current && isPlaying) {
+        try {
+          if (typeof playerRef.current.getCurrentTime === 'function') {
+            const time = playerRef.current.getCurrentTime();
+            if (time !== undefined && !isNaN(time)) {
+              currentTimeRef.current = time;
+            }
+          }
+        } catch (e) {
+          // Ignore errors
+        }
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isPlaying]);
 
   const createPlayer = () => {
-    if (!currentVideo) return;
+    if (!currentVideo) {
+      console.log('No current video, skipping player creation');
+      setHasVideo(false);
+      return;
+    }
 
+    if (isCreatingPlayer.current) {
+      console.log('Already creating player, skipping');
+      return;
+    }
+
+    if (!window.YT || !window.YT.Player) {
+      console.log('YouTube API not ready yet');
+      return;
+    }
+
+    isCreatingPlayer.current = true;
+    setHasVideo(true); // Mark that we have a video
+
+    // Save current time before destroying
+    if (playerRef.current && playerInitializedRef.current) {
+      try {
+        if (typeof playerRef.current.getCurrentTime === 'function') {
+          const time = playerRef.current.getCurrentTime();
+          if (time !== undefined && !isNaN(time)) {
+            currentTimeRef.current = time;
+            console.log('Saved current time:', time);
+          }
+        }
+      } catch (e) {
+        console.error('Error getting current time:', e);
+      }
+    }
+
+    // Destroy existing player
     if (playerRef.current) {
-      try { 
-        playerRef.current.destroy(); 
+      try {
+        if (typeof playerRef.current.destroy === 'function') {
+          playerRef.current.destroy();
+        }
+        playerRef.current = null;
       } catch (e) {
         console.error('Error destroying player:', e);
       }
     }
 
     const playerDiv = document.getElementById('youtube-player');
-    if (!playerDiv) return;
+    if (!playerDiv) {
+      console.error('Player div not found');
+      isCreatingPlayer.current = false;
+      return;
+    }
+
+    // Clear the player div
+    playerDiv.innerHTML = '';
 
     try {
+      console.log('Creating new player for video:', currentVideo.videoId, 'at time:', currentTimeRef.current);
+      
       playerRef.current = new window.YT.Player('youtube-player', {
         height: showVideo ? '480' : '0',
         width: '100%',
@@ -235,43 +376,94 @@ function Room() {
           playsinline: 1,
           enablejsapi: 1,
           origin: window.location.origin,
-          autoplay: isPlaying ? 1 : 0,
+          autoplay: 0,
           controls: 1,
           rel: 0,
-          modestbranding: 1
+          modestbranding: 1,
+          start: Math.floor(currentTimeRef.current)
         },
         events: {
           onReady: (event) => {
-            console.log('Player ready');
+            console.log('Player ready! Video:', currentVideo.title, 'at time:', currentTimeRef.current);
             playerInitializedRef.current = true;
-            if (isPlaying) {
-              setTimeout(() => event.target.playVideo(), 200);
+            isCreatingPlayer.current = false;
+            setHasVideo(true); // Confirm video is loaded
+            
+            // Seek to current time
+            try {
+              event.target.seekTo(currentTimeRef.current, true);
+              
+              // Play or pause based on state
+              setTimeout(() => {
+                if (isPlaying) {
+                  console.log('Starting playback');
+                  event.target.playVideo();
+                } else {
+                  console.log('Pausing playback');
+                  event.target.pauseVideo();
+                }
+              }, 300);
+            } catch (err) {
+              console.error('Error in onReady:', err);
             }
           },
           onStateChange: onPlayerStateChange,
           onError: (error) => {
             console.error('Player error:', error);
+            isCreatingPlayer.current = false;
+            playerInitializedRef.current = false;
+            
+            // Retry after error
+            setTimeout(() => {
+              if (currentVideo && !playerInitializedRef.current) {
+                console.log('Retrying player creation after error');
+                createPlayer();
+              }
+            }, 2000);
           }
         }
       });
     } catch (error) {
       console.error('Error creating player:', error);
+      isCreatingPlayer.current = false;
+      playerInitializedRef.current = false;
     }
   };
 
   const onPlayerStateChange = (event) => {
-    if (ignoreNextStateChange.current) return;
+    if (ignoreNextStateChange.current) {
+      console.log('Ignoring state change');
+      return;
+    }
 
-    if (event.data === window.YT.PlayerState.PLAYING) {
+    const state = event.data;
+    console.log('Player state changed:', state);
+
+    if (state === window.YT.PlayerState.PLAYING) {
       if (!isPlaying && socketRef.current) {
-        socketRef.current.emit('play-video');
+        try {
+          const currentTime = playerRef.current.getCurrentTime();
+          currentTimeRef.current = currentTime;
+          console.log('Emitting play at:', currentTime);
+          socketRef.current.emit('play-video', { time: currentTime });
+        } catch (err) {
+          console.error('Error in play handler:', err);
+        }
       }
-    } else if (event.data === window.YT.PlayerState.PAUSED) {
+    } else if (state === window.YT.PlayerState.PAUSED) {
       if (isPlaying && socketRef.current) {
-        socketRef.current.emit('pause-video');
+        try {
+          const currentTime = playerRef.current.getCurrentTime();
+          currentTimeRef.current = currentTime;
+          console.log('Emitting pause at:', currentTime);
+          socketRef.current.emit('pause-video', { time: currentTime });
+        } catch (err) {
+          console.error('Error in pause handler:', err);
+        }
       }
-    } else if (event.data === window.YT.PlayerState.ENDED) {
+    } else if (state === window.YT.PlayerState.ENDED) {
       if (socketRef.current) {
+        console.log('Video ended, playing next');
         socketRef.current.emit('next-video');
       }
     }
@@ -331,10 +523,26 @@ function Room() {
   };
 
   const toggleVideoVisibility = () => {
+    // Save current time before toggling
+    if (playerRef.current && playerInitializedRef.current) {
+      try {
+        if (typeof playerRef.current.getCurrentTime === 'function') {
+          const time = playerRef.current.getCurrentTime();
+          if (time !== undefined && !isNaN(time)) {
+            currentTimeRef.current = time;
+          }
+        }
+      } catch (e) {
+        console.error('Error getting time:', e);
+      }
+    }
+    
     setShowVideo(!showVideo);
+    playerInitializedRef.current = false;
+    
+    // Recreate player with preserved time
     setTimeout(() => {
       if (currentVideo) {
-        playerInitializedRef.current = false;
         createPlayer();
       }
     }, 100);
@@ -410,7 +618,7 @@ function Room() {
             )}
 
             <div className="player-wrapper" style={{ display: showVideo ? 'block' : 'none' }}>
-              <div id="youtube-player">
+              <div id="youtube-player" key={currentVideo?.videoId || 'empty'}>
                 {!currentVideo && (
                   <div className="player-empty-state">
                     <div className="empty-icon">🎵</div>
@@ -426,7 +634,8 @@ function Room() {
               <button 
                 className="control-btn control-btn-toggle"
                 onClick={toggleVideoVisibility}
-                disabled={!currentVideo}
+                disabled={!hasVideo}
+                title={!hasVideo ? 'No video loaded' : (showVideo ? 'Switch to Audio Mode' : 'Switch to Video Mode')}
               >
                 {showVideo ? '🎧 Audio Mode' : '📺 Video Mode'}
               </button>
