@@ -198,6 +198,7 @@ function Room() {
     newSocket.on('video-paused', ({ controller, currentTime }) => {
       console.log('Pause command from:', controller, 'at', currentTime);
       setIsPlaying(false);
+      isPlayingRef.current = false;
       setCurrentController(controller);
       
       if (currentTime !== undefined) {
@@ -463,15 +464,17 @@ function Room() {
     }
 
     const state = event.data;
-    console.log('Player state changed:', state, 'Current isPlaying:', isPlaying);
+    console.log('Player state changed:', state, 'Current isPlayingRef:', isPlayingRef.current);
 
     if (state === window.YT.PlayerState.PLAYING) {
-      if (!isPlaying && socketRef.current) {
+      if (!isPlayingRef.current && socketRef.current) {
         try {
           const currentTime = playerRef.current.getCurrentTime();
           currentTimeRef.current = currentTime;
           console.log('User initiated play - Emitting play at:', currentTime);
           ignoreNextStateChange.current = true;
+          isPlayingRef.current = true;
+          setIsPlaying(true);
           socketRef.current.emit('play-video', { time: currentTime });
           setTimeout(() => { ignoreNextStateChange.current = false; }, 500);
         } catch (err) {
@@ -480,12 +483,14 @@ function Room() {
         }
       }
     } else if (state === window.YT.PlayerState.PAUSED) {
-      if (isPlaying && socketRef.current) {
+      if (isPlayingRef.current && socketRef.current) {
         try {
           const currentTime = playerRef.current.getCurrentTime();
           currentTimeRef.current = currentTime;
           console.log('User initiated pause - Emitting pause at:', currentTime);
           ignoreNextStateChange.current = true;
+          isPlayingRef.current = false;
+          setIsPlaying(false);
           socketRef.current.emit('pause-video', { time: currentTime });
           setTimeout(() => { ignoreNextStateChange.current = false; }, 500);
         } catch (err) {
