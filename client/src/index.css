@@ -656,6 +656,41 @@ input:focus-visible {
   flex: 1;
 }
 
+.name-input-section {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 20px;
+  margin-bottom: 24px;
+  backdrop-filter: blur(10px);
+}
+
+.name-input-section .form-label {
+  display: block;
+  margin-bottom: 10px;
+  color: #f8fafc;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.name-input-section .form-input {
+  width: 100%;
+  padding: 14px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  font-size: 15px;
+  transition: all 0.3s ease;
+}
+
+.name-input-section .form-input:focus {
+  outline: none;
+  border-color: #6366f1;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
 .tab-switcher {
   display: flex;
   gap: 12px;

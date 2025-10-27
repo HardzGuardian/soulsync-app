@@ -78,6 +78,22 @@ function Home() {
 
       {/* Main Content */}
       <div className="main-content">
+        {/* Your Name Input - Always Visible */}
+        <div className="name-input-section">
+          <label className="form-label">Your Name</label>
+          <input
+            type="text"
+            placeholder="Enter your name"
+            value={userName}
+            onChange={(e) => {
+              setUserName(e.target.value);
+              setJoinUserName(e.target.value);
+            }}
+            className="form-input"
+            maxLength={20}
+          />
+        </div>
+
         {/* Tab Switcher */}
         <div className="tab-switcher">
           <button 
@@ -102,19 +118,6 @@ function Home() {
           {activeTab === 'create' && (
             <form onSubmit={createRoom} className="room-form fade-in">
               <div className="form-group">
-                <label className="form-label">Your Name</label>
-                <input
-                  type="text"
-                  placeholder="Enter your name"
-                  value={userName}
-                  onChange={(e) => setUserName(e.target.value)}
-                  className="form-input"
-                  required
-                  maxLength={20}
-                />
-              </div>
-              
-              <div className="form-group">
                 <label className="form-label">Room Name</label>
                 <input
                   type="text"
@@ -127,7 +130,7 @@ function Home() {
                 />
               </div>
 
-              <button type="submit" className="submit-button create-button">
+              <button type="submit" className="submit-button create-button" disabled={!userName.trim()}>
                 <span className="button-icon">🎵</span>
                 Create Listening Room
               </button>
@@ -137,19 +140,6 @@ function Home() {
           {/* Join Room Form */}
           {activeTab === 'join' && (
             <form onSubmit={joinRoom} className="room-form fade-in">
-              <div className="form-group">
-                <label className="form-label">Your Name</label>
-                <input
-                  type="text"
-                  placeholder="Enter your name"
-                  value={joinUserName}
-                  onChange={(e) => setJoinUserName(e.target.value)}
-                  className="form-input"
-                  required
-                  maxLength={20}
-                />
-              </div>
-              
               <div className="form-group">
                 <label className="form-label">Room ID</label>
                 <input
@@ -162,7 +152,7 @@ function Home() {
                 />
               </div>
 
-              <button type="submit" className="submit-button join-button">
+              <button type="submit" className="submit-button join-button" disabled={!userName.trim()}>
                 <span className="button-icon">🔗</span>
                 Join Room
               </button>
